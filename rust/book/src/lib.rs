@@ -462,19 +462,44 @@ impl Default for Order {
 /// cache line that holds both the key and the payload.
 #[derive(Debug)]
 pub struct OrderMap {
-    keys: Vec<u64>,
-    values: Vec<Order>,
+    slots: Vec<Slot>,
     mask: usize,
     len: usize,
 }
 
+/// One table slot: the key beside the order it addresses, in one allocation.
+///
+/// This started as parallel `keys` and `values` vectors, which is the shape
+/// that reads well and the wrong one for the access pattern. Every successful
+/// lookup wants the value the instant the key matches, and two allocations put
+/// those on two cache lines -- so the common case paid two misses where one
+/// would do. Interleaved, the line that answers the key question carries the
+/// answer with it.
+///
+/// The trade is that a probe now strides 32 bytes rather than 8, so a long
+/// chain touches more lines. Worth 7% on the isolation benchmark even so.
+#[derive(Clone, Copy, Debug, Default)]
+struct Slot {
+    key: u64,
+    order: Order,
+}
+
 impl OrderMap {
+    /// Grow at three-quarters full.
+    ///
+    /// Halving this was the obvious follow-up to interleaving -- shorter
+    /// clusters, fewer lines touched per probe -- and five runs a side put it
+    /// 1.4% ahead, which is inside this machine's noise. Not kept: the table
+    /// doubles, and one that no longer fits L2 loses more than short clusters
+    /// win. Measured in both directions rather than assumed.
+    const MAX_LOAD_NUMERATOR: usize = 3;
+    const MAX_LOAD_DENOMINATOR: usize = 4;
+
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         let size = capacity.next_power_of_two().max(16) * 2;
         Self {
-            keys: vec![0; size],
-            values: vec![Order::default(); size],
+            slots: vec![Slot::default(); size],
             mask: size - 1,
             len: 0,
         }
@@ -491,17 +516,19 @@ impl OrderMap {
 
     pub fn insert(&mut self, key: u64, value: Order) {
         debug_assert_ne!(key, 0, "order ID zero is the reserved empty marker");
-        if (self.len + 1) * 4 > self.keys.len() * 3 {
+        if (self.len + 1) * Self::MAX_LOAD_DENOMINATOR
+            > self.slots.len() * Self::MAX_LOAD_NUMERATOR
+        {
             self.grow();
         }
         let mut at = self.slot(key);
         loop {
-            if self.keys[at] == 0 || self.keys[at] == key {
-                if self.keys[at] == 0 {
+            let held = self.slots[at].key;
+            if held == 0 || held == key {
+                if held == 0 {
                     self.len += 1;
                 }
-                self.keys[at] = key;
-                self.values[at] = value;
+                self.slots[at] = Slot { key, order: value };
                 return;
             }
             at = (at + 1) & self.mask;
@@ -512,9 +539,10 @@ impl OrderMap {
     pub fn get(&self, key: u64) -> Option<&Order> {
         let mut at = self.slot(key);
         loop {
-            match self.keys[at] {
+            let slot = &self.slots[at];
+            match slot.key {
                 0 => return None,
-                held if held == key => return Some(&self.values[at]),
+                held if held == key => return Some(&slot.order),
                 _ => at = (at + 1) & self.mask,
             }
         }
@@ -523,50 +551,49 @@ impl OrderMap {
     pub fn get_mut(&mut self, key: u64) -> Option<&mut Order> {
         let mut at = self.slot(key);
         loop {
-            match self.keys[at] {
+            match self.slots[at].key {
                 0 => return None,
-                held if held == key => return Some(&mut self.values[at]),
+                held if held == key => return Some(&mut self.slots[at].order),
                 _ => at = (at + 1) & self.mask,
             }
         }
     }
 
     /// Removes and returns the order, closing the probe gap by shifting
-    /// followers back — so lookups never wade through tombstones, no matter
+    /// followers back -- so lookups never wade through tombstones, no matter
     /// how many billions of cancels have passed through.
     pub fn remove(&mut self, key: u64) -> Option<Order> {
         let mut at = self.slot(key);
         loop {
-            match self.keys[at] {
+            match self.slots[at].key {
                 0 => return None,
                 held if held == key => break,
                 _ => at = (at + 1) & self.mask,
             }
         }
-        let removed = self.values[at];
+        let removed = self.slots[at].order;
         self.len -= 1;
         // Backward-shift: any follower whose home slot is at or before the
         // hole moves into it, until an empty slot ends the cluster.
         let mut hole = at;
         let mut probe = (at + 1) & self.mask;
         loop {
-            let key_here = self.keys[probe];
-            if key_here == 0 {
+            let slot = self.slots[probe];
+            if slot.key == 0 {
                 break;
             }
-            let home = self.slot(key_here);
+            let home = self.slot(slot.key);
             // Does `probe`'s entry want to be at or before `hole`? Handle the
             // ring wraparound by measuring distances from the home slot.
             let hole_distance = hole.wrapping_sub(home) & self.mask;
             let probe_distance = probe.wrapping_sub(home) & self.mask;
             if hole_distance <= probe_distance {
-                self.keys[hole] = key_here;
-                self.values[hole] = self.values[probe];
+                self.slots[hole] = slot;
                 hole = probe;
             }
             probe = (probe + 1) & self.mask;
         }
-        self.keys[hole] = 0;
+        self.slots[hole].key = 0;
         Some(removed)
     }
 
@@ -581,16 +608,12 @@ impl OrderMap {
     }
 
     fn grow(&mut self) {
-        let old_keys = std::mem::replace(&mut self.keys, vec![0; (self.mask + 1) * 2]);
-        let old_values = std::mem::replace(
-            &mut self.values,
-            vec![Order::default(); (self.mask + 1) * 2],
-        );
-        self.mask = self.keys.len() - 1;
+        let old = std::mem::replace(&mut self.slots, vec![Slot::default(); (self.mask + 1) * 2]);
+        self.mask = self.slots.len() - 1;
         self.len = 0;
-        for (key, value) in old_keys.into_iter().zip(old_values) {
-            if key != 0 {
-                self.insert(key, value);
+        for slot in old {
+            if slot.key != 0 {
+                self.insert(slot.key, slot.order);
             }
         }
     }

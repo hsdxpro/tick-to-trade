@@ -30,11 +30,11 @@ book does two updates.
 
 | Stage | cost | share |
 |---|---:|---:|
-| book (ladder + order map) | 69.2 ns | **71.8%** |
-| parse (ITCH framing + fields) | 14.7 ns | 15.3% |
-| arbitrate (MoldUDP64 A/B) | 13.2 ns | 13.7% |
-| decide + encode | <1 ns | ~0% |
-| total | 96.3 ns | 100% |
+| book (ladder + order map) | 57.0 ns | **66.2%** |
+| parse (ITCH framing + fields) | 14.8 ns | 17.2% |
+| arbitrate (MoldUDP64 A/B) | 12.8 ns | 14.9% |
+| decide + encode | 1.4 ns | 1.7% |
+| total | **86.0 ns** | 100% |
 
 ## Parsers
 
@@ -58,12 +58,15 @@ FNV fingerprints pinned in both test suites.
 
 | Structure | Custom | Standard | Gain |
 |---|---:|---:|---:|
-| Ladder, isolated (Rust) | 2.7 ms | BTreeMap 30.4 ms | **11×** |
-| Order map, isolated (Rust) | 36.5 ms | HashMap 44.2 ms | 1.2× |
-| Book blended, Rust | 53.7 ns/ev | 102.8 ns/ev | 1.9× |
-| Book blended, C++ | 48.5 ns/ev | std::map 214.5 ns/ev | 4.4× |
+| Ladder, isolated (Rust) | 2.3 ms | BTreeMap 27.9 ms | **12×** |
+| Order map, isolated (Rust) | 33.3 ms | HashMap 48.9 ms | 1.5× |
+| Book blended, Rust | 39.9 ns/ev | 90.7 ns/ev | 2.3× |
+| Book blended, C++ | 53.9 ns/ev | std::map 239.4 ns/ev | 4.4× |
 | SPSC ring, 20M items | 1.6 ns/item | sync_channel 13.9, crossbeam 27.5 | **8.7×** |
 
+- The order map's key and value arrays were separate allocations, so a
+  successful lookup paid two cache misses. Interleaving them into one array
+  cut the book stage 17% and the whole internal path from 96.3 ns to 86.0.
 - Book rows: same 992,670 operations, identical final state.
 - The first ladder was a sorted array. It lost to `BTreeMap` and was deleted —
   the rule that killed it is the point.
