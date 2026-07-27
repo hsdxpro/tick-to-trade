@@ -291,7 +291,7 @@ mod tests {
     }
 
     #[test]
-    fn silence_produces_a_heartbeat_then_a_verdict() {
+    fn silence_produces_a_heartbeat_then_declares_the_peer_gone() {
         let start = Instant::now();
         let mut session = session(start);
         assert_eq!(session.due(start), Action::Idle);
@@ -313,7 +313,7 @@ mod tests {
     }
 
     #[test]
-    fn hearing_from_the_peer_postpones_the_verdict() {
+    fn hearing_from_the_peer_postpones_declaring_it_gone() {
         let start = Instant::now();
         let mut session = session(start);
         session.received(Inbound::Heartbeat, start + Duration::from_millis(400));
