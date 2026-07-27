@@ -57,6 +57,10 @@ add_test(NAME t2t_test_book COMMAND t2t_test_book)
 add_executable(t2t_bench_book bench/bench_book.cpp)
 target_link_libraries(t2t_bench_book PRIVATE t2t)
 
+add_executable(t2t_test_mold tests/test_mold.cpp)
+target_link_libraries(t2t_test_mold PRIVATE t2t)
+add_test(NAME t2t_test_mold COMMAND t2t_test_mold)
+
 add_executable(t2t_bench_internal bench/bench_internal.cpp)
 target_link_libraries(t2t_bench_internal PRIVATE t2t Threads::Threads)
 

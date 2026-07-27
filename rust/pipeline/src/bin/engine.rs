@@ -22,6 +22,7 @@ use std::io::Write;
 use std::net::{TcpStream, UdpSocket};
 use t2t_feed::Parser;
 use t2t_feed::synth::TRADFI;
+use t2t_pipeline::affinity;
 use t2t_pipeline::transport::{BusyPoll, Receiver};
 use t2t_pipeline::{BAND, BboUpdate, FeedStage, OrderCommand, Strategy};
 
@@ -49,8 +50,15 @@ fn main() -> std::io::Result<()> {
     let (mut to_strategy, mut from_feed) = t2t_spsc::channel::<BboUpdate>(1024);
     let (mut to_gateway, mut from_strategy) = t2t_spsc::channel::<OrderCommand>(1024);
 
+    // One core per stage, so a migration cannot cost a stage its warm caches
+    // mid-burst. Reported rather than enforced: a container with a restricted
+    // mask should run slower, not refuse to start.
+    let cores = affinity::available();
+    println!("engine: {cores} cores available");
+
     // Feed: the socket's only reader, and the owner of the books.
     let feed = std::thread::spawn(move || -> std::io::Result<()> {
+        let _ = affinity::pin_to(0);
         let parser = t2t_feed::itch::Itch { symbols: TRADFI };
         let mut sink = FeedStage::new(TRADFI.len(), BAND);
         let mut datagram = [0_u8; 2048];
@@ -79,6 +87,7 @@ fn main() -> std::io::Result<()> {
 
     // Strategy: one decision, no I/O.
     let strategy = std::thread::spawn(move || {
+        let _ = affinity::pin_to(1 % cores);
         let mut strategy = Strategy::default();
         loop {
             let Some(update) = from_feed.try_pop() else {
@@ -96,6 +105,7 @@ fn main() -> std::io::Result<()> {
     });
 
     // Gateway: bytes out, nothing else.
+    let _ = affinity::pin_to(2 % cores);
     loop {
         let Some(order) = from_strategy.try_pop() else {
             std::hint::spin_loop();

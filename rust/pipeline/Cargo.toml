@@ -18,9 +18,14 @@ t2t-book = { path = "../book" }
 # benchmark's io_uring variant. The libraries above it stay dependency-free.
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = "0.7"
+libc = "0.2"
 
 [[bench]]
 name = "internal"
+harness = false
+
+[[bench]]
+name = "profile"
 harness = false
 
 [lints.rust]

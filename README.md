@@ -13,11 +13,22 @@ UDP ticks → [parse + book + BBO] →ring→ [strategy] →ring→ [gateway] �
 |---|---:|---:|---:|
 | Compute only (parse + book + decide + encode) | <100 ns | **~100 ns** | 300 ns |
 | Production layout (3 threads, SPSC rings) | 200 ns | **~300 ns** | 600 ns |
-| Wire-to-wire (UDP in, TCP out, loopback) | 9.7 µs | **12.5 µs** | 25.1 µs |
+| Wire-to-wire, unpinned | 9.7 µs | 12.5 µs | 25.1 µs |
+| Wire-to-wire, **pinned** (UDP in, TCP out, loopback) | 9.3 µs | **10.0 µs** | 26.5 µs |
 
-C++ matches: ~100 ns compute, ~400 ns staged, **11.9 µs** wire-to-wire through
-the same Rust harness. The ~12 µs gap between internal and wire is the two
-kernel network stacks — the kernel-bypass motivation, priced.
+Pinning each stage to its own core cut p50 by 20%: a migrated thread arrives
+on a core holding none of its working set. C++ matches: ~100 ns compute,
+~400 ns staged, **11.9 µs** wire-to-wire through the same Rust harness. The
+~10 µs gap between internal and wire is the two kernel network stacks — the
+kernel-bypass motivation, priced.
+
+Where the internal time goes, amortized over a million probes:
+
+| Stage | cost | share |
+|---|---:|---:|
+| book (ladder + order map) | 51.8 ns | **68.5%** |
+| parse (ITCH framing + fields) | 23.7 ns | 31.4% |
+| decide + encode | 0.1 ns | 0.1% |
 
 Wire figures are timestamped at the **counterparty**: T0 before the tick leaves
 the harness, T1 when the order's bytes arrive back. The engine's own `send`
@@ -51,6 +62,21 @@ fingerprints pinned in both test suites.
 Same 992,670 operations, identical final state. The first ladder was a sorted
 array; it lost to `BTreeMap` and was replaced. The module doc keeps that story.
 
+## Feed sequencing and order-entry session
+
+Real feeds arrive as MoldUDP64: sequenced datagrams sent twice down
+independent paths. The arbitrator delivers each sequence exactly once, in
+order, from whichever line won — and the fast path is **one compare**, because
+a packet lost on line A arrives *in sequence* on line B. Only a packet ahead of
+expectation means both lines lost the same data; only then is the stash
+touched. Verified by 20,000 sequences across two lines at 20% independent loss,
+in both languages: every sequence delivered exactly once, in order.
+
+Order entry is a session, not a socket: sequence numbers, heartbeats, and a
+retain ring for resend. Sending is stamp, copy 32 bytes, write — no allocation,
+no scan, no clock read on the send path. A resend request past what is retained
+is refused rather than answered with a hole.
+
 ## Receive transports
 
 | Transport | Windows p50 | Linux p50 |
@@ -69,9 +95,9 @@ DPDK-bound NIC would be invented.
 
 ```text
 rust/spsc       wait-free SPSC ring       loom-model-checked
-rust/feed       ITCH · FIX · JSON         one normalized fixed-point event
+rust/feed       ITCH · FIX · JSON · Mold  one event; A/B arbitration
 rust/book       L2/L3 maintenance         banded bitmap ladder + open addressing
-rust/pipeline   engine · harness · rxlat  the measured pipeline
+rust/pipeline   engine · harness · rxlat  stages, session, affinity, transports
 cpp/            protocol-identical twins  MSVC + GCC, TSAN on Linux
 ```
 
@@ -86,7 +112,7 @@ cargo test --release                    # differential tests
 cargo bench -p t2t-spsc                 # ring throughput + hop latency
 cargo bench -p t2t-feed                 # parser table
 cargo bench -p t2t-book                 # book tables
-cargo bench -p t2t-pipeline             # internal tick-to-trade
+cargo bench -p t2t-pipeline             # internal tick-to-trade + attribution
 cargo run --release --bin rxlat         # transport table
 RUSTFLAGS="--cfg loom" cargo test -p t2t-spsc --release   # model checking
 ```

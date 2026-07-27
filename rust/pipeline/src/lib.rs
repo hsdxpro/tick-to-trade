@@ -7,6 +7,8 @@
 //! socket), the strategy never touches a socket (its latency is the decision,
 //! not the I/O), and the gateway never parses (bytes out is its whole job).
 
+pub mod affinity;
+pub mod session;
 pub mod transport;
 
 use t2t_book::{Band, Books};

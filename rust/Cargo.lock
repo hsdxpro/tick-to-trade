@@ -295,6 +295,7 @@ name = "t2t-pipeline"
 version = "0.1.0"
 dependencies = [
  "io-uring",
+ "libc",
  "t2t-book",
  "t2t-feed",
  "t2t-spsc",

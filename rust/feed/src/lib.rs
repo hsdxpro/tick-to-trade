@@ -33,6 +33,7 @@
 pub mod fix;
 pub mod itch;
 pub mod json;
+pub mod mold;
 pub mod synth;
 
 /// Fixed-point scale for prices: 1e8, enough for crypto's satoshi-style
