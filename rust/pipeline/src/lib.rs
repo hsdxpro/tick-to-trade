@@ -97,11 +97,11 @@ mod tests {
     }
 }
 
-/// The band the harness's probes stay inside.
+/// The grid the probes trade on: one-cent ticks, a window wide enough for a
+/// book's live depth. Where it sits is the ladder's business, not ours.
 pub const BAND: Band = Band {
-    floor: (1_000_000 - 3_200) * 10_000,
     tick: 100 * 10_000,
-    ticks: 5_070,
+    ticks: 4_096,
 };
 
 /// The feed stage's state: books, and the last touch seen for symbol zero.
@@ -178,41 +178,95 @@ impl Strategy {
     }
 }
 
-/// Probe datagrams: delete the previous order, add the next at a price that
-/// cycles inside the band. Shared by the wire harness and the internal
-/// benchmark so both measure the same traffic.
+/// The probe stream, generated in exactly one place.
+///
+/// Mold-framed ITCH: each datagram deletes the previous probe's order and adds
+/// the next, so the book holds one live order and every probe moves the bid.
+/// Sequence numbers advance by message count, which is what MoldUDP64 counts
+/// and what the arbitrator expects.
+///
+/// The harness sends this and the internal benchmark replays it, so both
+/// measure the same traffic through the same framing.
 pub mod probe {
+    use t2t_feed::mold::{HEADER_LEN, Header};
+
+    /// The session every probe stream runs under.
+    pub const SESSION: [u8; 10] = *b"T2TPROBE01";
+    /// Sequence of the first message.
+    pub const FIRST_SEQUENCE: u64 = 1;
+
     fn frame(out: &mut Vec<u8>, body: &[u8]) {
         out.extend_from_slice(&(body.len() as u16).to_be_bytes());
         out.extend_from_slice(body);
     }
 
-    #[must_use]
-    pub fn price_of(index: usize) -> u32 {
-        1_000_000 + ((index as u32) % 2_000) * 100
+    /// Generates the stream, owning the sequence and order-id state so no
+    /// caller has to reproduce it.
+    #[derive(Debug)]
+    pub struct Probes {
+        sequence: u64,
+        previous: Option<u64>,
+        index: usize,
     }
 
-    #[must_use]
-    pub fn datagram(previous: Option<u64>, order: u64, price: u32) -> Vec<u8> {
-        let mut out = Vec::with_capacity(2 + 19 + 2 + 36);
-        if let Some(previous) = previous {
-            let mut body = Vec::with_capacity(19);
-            body.push(b'D');
-            body.extend_from_slice(&0_u16.to_be_bytes());
-            body.extend_from_slice(&[0; 8]);
-            body.extend_from_slice(&previous.to_be_bytes());
-            frame(&mut out, &body);
+    impl Default for Probes {
+        fn default() -> Self {
+            Self::new()
         }
-        let mut body = Vec::with_capacity(36);
-        body.push(b'A');
-        body.extend_from_slice(&0_u16.to_be_bytes());
-        body.extend_from_slice(&[0; 8]);
-        body.extend_from_slice(&order.to_be_bytes());
-        body.push(b'B');
-        body.extend_from_slice(&100_u32.to_be_bytes());
-        body.extend_from_slice(b"AAPL    ");
-        body.extend_from_slice(&price.to_be_bytes());
-        frame(&mut out, &body);
-        out
+    }
+
+    impl Probes {
+        #[must_use]
+        pub const fn new() -> Self {
+            Self {
+                sequence: FIRST_SEQUENCE,
+                previous: None,
+                index: 0,
+            }
+        }
+
+        /// The next Mold-framed datagram.
+        pub fn next_datagram(&mut self) -> Vec<u8> {
+            // Cycles inside the book's band; a monotonic climb would leave it.
+            let price = 1_000_000 + ((self.index as u32) % 2_000) * 100;
+            let order = self.index as u64 + 1;
+
+            let mut body = Vec::with_capacity(HEADER_LEN + 19 + 2 + 36 + 2);
+            let mut messages = 0_u16;
+            if let Some(previous) = self.previous {
+                let mut delete = Vec::with_capacity(19);
+                delete.push(b'D');
+                delete.extend_from_slice(&0_u16.to_be_bytes());
+                delete.extend_from_slice(&[0; 8]);
+                delete.extend_from_slice(&previous.to_be_bytes());
+                frame(&mut body, &delete);
+                messages += 1;
+            }
+            let mut add = Vec::with_capacity(36);
+            add.push(b'A');
+            add.extend_from_slice(&0_u16.to_be_bytes());
+            add.extend_from_slice(&[0; 8]);
+            add.extend_from_slice(&order.to_be_bytes());
+            add.push(b'B');
+            add.extend_from_slice(&100_u32.to_be_bytes());
+            add.extend_from_slice(b"AAPL    ");
+            add.extend_from_slice(&price.to_be_bytes());
+            frame(&mut body, &add);
+            messages += 1;
+
+            let header = Header {
+                session: SESSION,
+                sequence: self.sequence,
+                count: messages,
+            };
+            self.sequence += u64::from(messages);
+            self.previous = Some(order);
+            self.index += 1;
+
+            let mut datagram = Vec::with_capacity(HEADER_LEN + body.len());
+            datagram.extend_from_slice(&header.encode());
+            datagram.extend_from_slice(&body);
+            datagram
+        }
     }
 }

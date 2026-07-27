@@ -18,13 +18,16 @@
 //! engine --feed 127.0.0.1:9701 --orders 127.0.0.1:9702
 //! ```
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::{TcpStream, UdpSocket};
+use std::time::{Duration, Instant};
 use t2t_feed::Parser;
+use t2t_feed::mold::{Admit, Arbitrator, HEADER_LEN, Header};
 use t2t_feed::synth::TRADFI;
 use t2t_pipeline::affinity;
+use t2t_pipeline::session::{Action, Inbound, Session};
 use t2t_pipeline::transport::{BusyPoll, Receiver};
-use t2t_pipeline::{BAND, BboUpdate, FeedStage, OrderCommand, Strategy};
+use t2t_pipeline::{BAND, BboUpdate, FeedStage, OrderCommand, Strategy, probe};
 
 fn argument(name: &str, default: &str) -> String {
     let mut arguments = std::env::args().skip(1);
@@ -61,17 +64,40 @@ fn main() -> std::io::Result<()> {
         let _ = affinity::pin_to(0);
         let parser = t2t_feed::itch::Itch { symbols: TRADFI };
         let mut sink = FeedStage::new(TRADFI.len(), BAND);
+        let mut arbitrator = Arbitrator::new(probe::SESSION, probe::FIRST_SEQUENCE);
         let mut datagram = [0_u8; 2048];
         loop {
             let Some(received) = feed_rx.recv(&mut datagram)? else {
                 std::hint::spin_loop();
                 continue;
             };
-            // A datagram carries whole messages; a tail would be a framing
-            // bug on the sender's side and shows up as a parse error here.
-            if parser.parse(&datagram[..received], &mut sink).is_err() {
-                eprintln!("engine: undecodable datagram dropped");
-                continue;
+            let Ok(header) = Header::parse(&datagram[..received]) else {
+                continue; // shorter than a header: not ours
+            };
+            let payload = &datagram[HEADER_LEN..received];
+            match arbitrator.admit(&header, payload) {
+                Admit::Deliver => {
+                    if parser.parse(payload, &mut sink).is_err() {
+                        eprintln!("engine: undecodable payload dropped");
+                        continue;
+                    }
+                }
+                // The other line's copy of something already delivered.
+                Admit::Duplicate => continue,
+                // Both lines lost data. A venue-grade handler asks the rewind
+                // server; this one reports and resynchronizes, because
+                // inventing a recovery channel the harness does not serve
+                // would be scaffolding pretending to be a feature.
+                Admit::Gap { missing } | Admit::Unrecoverable { missing } => {
+                    eprintln!("engine: {missing} messages lost on both lines");
+                    arbitrator.resynchronize(header.session, header.sequence);
+                    continue;
+                }
+                Admit::SessionChanged => {
+                    eprintln!("engine: venue re-sequenced; resynchronizing");
+                    arbitrator.resynchronize(header.session, header.sequence);
+                    continue;
+                }
             }
             if let Some(update) = sink.take_moved() {
                 // The ring is sized for bursts; a full ring means the
@@ -104,16 +130,77 @@ fn main() -> std::io::Result<()> {
         }
     });
 
-    // Gateway: bytes out, nothing else.
+    // Gateway: bytes out through the session, and nothing else on the fast
+    // path. Acknowledgements and heartbeat timing are polled only when the
+    // ring is empty -- a clock read or a socket poll per order would cost more
+    // than the order does.
     let _ = affinity::pin_to(2 % cores);
+    orders.set_nonblocking(true)?;
+    let mut session = Session::new(
+        Duration::from_secs(1),
+        Duration::from_secs(5),
+        Instant::now(),
+    );
+    /// Idle spins between polls of the inbound socket and the clock. Each
+    /// spin is a few nanoseconds, so this is tens of microseconds of
+    /// granularity against a heartbeat measured in seconds.
+    const POLL_EVERY: u32 = 4_096;
+    let mut idle = 0_u32;
+    let mut inbound = [0_u8; 8];
+
     loop {
-        let Some(order) = from_strategy.try_pop() else {
-            std::hint::spin_loop();
+        if let Some(order) = from_strategy.try_pop() {
+            idle = 0;
+            let Some(bytes) = session.prepare(&order) else {
+                // Every retained slot is unacknowledged: sending would lose
+                // the ability to resend, which is worse than not sending.
+                eprintln!("engine: order window full; venue is not acknowledging");
+                continue;
+            };
+            write_all_nonblocking(&mut orders, bytes)?;
             continue;
-        };
-        orders.write_all(&order.encode())?;
-        if feed.is_finished() || strategy.is_finished() {
-            return Ok(());
+        }
+
+        idle = idle.wrapping_add(1);
+        if idle.is_multiple_of(POLL_EVERY) {
+            // The venue acknowledges with the highest sequence it holds.
+            match orders.read(&mut inbound) {
+                Ok(8) => session.received(
+                    Inbound::Acknowledged(u64::from_le_bytes(inbound)),
+                    Instant::now(),
+                ),
+                Ok(0) => return Ok(()), // venue closed
+                Ok(_) | Err(_) => {}    // partial or nothing waiting
+            }
+            match session.due(Instant::now()) {
+                Action::Idle => {}
+                Action::SendHeartbeat => session.heartbeat_sent(Instant::now()),
+                Action::PeerIsDead => {
+                    eprintln!("engine: venue silent past its deadline");
+                    return Ok(());
+                }
+            }
+            if feed.is_finished() || strategy.is_finished() {
+                return Ok(());
+            }
+        }
+        std::hint::spin_loop();
+    }
+}
+
+/// Writes every byte to a nonblocking stream, spinning on back-pressure.
+///
+/// The socket is nonblocking so the gateway can poll acknowledgements without
+/// a second thread; a full send buffer therefore means the venue is behind,
+/// and spinning is the same answer the rest of the pipeline gives.
+fn write_all_nonblocking(stream: &mut TcpStream, mut bytes: &[u8]) -> std::io::Result<()> {
+    while !bytes.is_empty() {
+        match stream.write(bytes) {
+            Ok(0) => return Err(std::io::Error::from(std::io::ErrorKind::WriteZero)),
+            Ok(written) => bytes = &bytes[written..],
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::hint::spin_loop(),
+            Err(e) => return Err(e),
         }
     }
+    Ok(())
 }

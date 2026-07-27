@@ -7,12 +7,13 @@
 //
 // The two structures, and why they are custom:
 //
-//   * Ladder -- a dense quantity array over the instrument's price band with
-//     an occupancy bitmap above it. A feed handler knows the band and tick
-//     size (venues publish both), so a price is an index and an update is a
-//     store; re-finding the touch after it empties is a first-set-bit walk.
-//     The Rust module documents the sorted-array design this replaced and
-//     the benchmark that killed it.
+//   * Ladder -- a dense quantity array over a window of the instrument's
+//     price grid with an occupancy bitmap above it. Prices live on a grid, so
+//     a price is an index and an update is a store; re-finding the touch after
+//     it empties is a first-set-bit walk. The window follows the market and
+//     the index is a reciprocal multiply rather than a divide. The Rust module
+//     documents the sorted-array design this replaced and the benchmark that
+//     killed it.
 //   * OrderMap -- order ID to order, open addressing, linear probing,
 //     power-of-two table, backward-shift deletion so churn never leaves
 //     tombstones. ID zero is the reserved empty marker, a documented contract
@@ -20,10 +21,12 @@
 
 #include "../feed/feed.hpp"
 
+#include <algorithm>
 #include <bit>
 #include <cassert>
 #include <cstdint>
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace t2t::book {
@@ -32,9 +35,13 @@ using feed::Event;
 using feed::Kind;
 using feed::Side;
 
-/// An instrument's price band, in fixed-point price units.
+/// An instrument's price grid: the tick size, and how wide a window of it to
+/// keep resident.
+///
+/// No floor. The window finds its own place from the first price it sees, so
+/// one structure serves a penny-tick equity and a cent-tick perpetual without
+/// either being sized for a year of price history.
 struct Band {
-    std::int64_t floor;
     std::int64_t tick;
     std::size_t ticks;
 };
@@ -58,7 +65,10 @@ public:
 
     /// Adds signed quantity at a price; a level reaching zero is removed.
     void add(std::int64_t price, std::int64_t delta) {
-        const auto index = this->index(price);
+        const auto index = locate(price);
+        if (index == kEmpty) {
+            return;
+        }
         const auto was = qty_[index];
         const auto now = std::max<std::int64_t>(was + delta, 0);
         qty_[index] = now;
@@ -67,7 +77,10 @@ public:
 
     /// Sets the absolute quantity at a price; zero removes (L2 feeds).
     void set(std::int64_t price, std::int64_t qty) {
-        const auto index = this->index(price);
+        const auto index = locate(price);
+        if (index == kEmpty) {
+            return;
+        }
         const auto was = qty_[index];
         const auto now = std::max<std::int64_t>(qty, 0);
         qty_[index] = now;
@@ -79,38 +92,166 @@ public:
         if (best_ == kEmpty) {
             return std::nullopt;
         }
-        return {{floor_ + static_cast<std::int64_t>(best_) * tick_, qty_[best_]}};
+        return {{price_at(best_), qty_[best_]}};
     }
 
     [[nodiscard]] std::size_t depth() const { return len_; }
+
+    /// Windows shifted, prices refused for being off-grid, and levels dropped
+    /// for falling a whole window behind the market. Counted rather than
+    /// logged: an operator watching any of the three climb learns something,
+    /// and the hot path pays an increment.
+    [[nodiscard]] std::uint64_t rebases() const { return rebases_; }
+    [[nodiscard]] std::uint64_t off_grid() const { return off_grid_; }
+    [[nodiscard]] std::uint64_t evicted() const { return evicted_; }
 
     /// Visits live levels from the touch outward.
     template <typename Visit>
     void for_each_from_touch(Visit&& visit) const {
         for (auto at = best_; at != kEmpty; at = next_worse(at)) {
-            visit(floor_ + static_cast<std::int64_t>(at) * tick_, qty_[at]);
+            visit(price_at(at), qty_[at]);
         }
     }
 
 private:
+    /// The scale is picked from the width, and the width then bounds the tick.
+    ///
+    /// `shift = 63 - ceil(log2(ticks))` is the largest scale at which the
+    /// product in `index_of` provably cannot overflow 64 bits. That choice
+    /// costs a ceiling on `ticks * tick`, asserted here rather than left to be
+    /// discovered: at the 4,096-tick default it permits ticks up to about
+    /// 5.5e11, six orders of magnitude past the coarsest tick any venue quotes
+    /// in fixed point.
     Ladder(const Band& band, bool descending)
         : qty_(band.ticks, 0),
           occupied_((band.ticks + 63) / 64, 0),
-          floor_(band.floor),
           tick_(band.tick),
+          shift_(63 - static_cast<unsigned>(std::bit_width(band.ticks - 1))),
+          reciprocal_(ceil_div(1ULL << shift_, static_cast<std::uint64_t>(band.tick))),
           descending_(descending) {
-        assert(band.tick > 0 && band.ticks > 0);
+        // Four levels is what makes the quarter-window headroom at least one
+        // tick, which is what guarantees a rebase always moves the base.
+        assert(band.tick > 0 && band.ticks >= 4
+               && "a grid needs a positive tick and at least four levels");
+        assert(static_cast<std::uint64_t>(band.ticks)
+                       <= (1ULL << shift_) / static_cast<std::uint64_t>(band.tick)
+               && "ticks * tick must fit the reciprocal's scale");
     }
 
-    /// A price the band cannot address is a configuration error; refusing
-    /// beats silently folding it into the nearest level.
-    [[nodiscard]] std::size_t index(std::int64_t price) const {
-        const auto offset = price - floor_;
-        const auto index = offset / tick_;
-        assert(offset >= 0 && offset % tick_ == 0
-               && static_cast<std::size_t>(index) < qty_.size()
-               && "price outside the configured band or off-tick");
-        return static_cast<std::size_t>(index);
+    static constexpr std::uint64_t ceil_div(std::uint64_t a, std::uint64_t b) {
+        return a / b + (a % b != 0 ? 1 : 0);
+    }
+
+    [[nodiscard]] std::int64_t price_at(std::size_t index) const {
+        return base_ + static_cast<std::int64_t>(index) * tick_;
+    }
+
+    /// `(price - base) / tick`, as a multiply.
+    ///
+    /// With `m = ceil(2^s / tick)`, `tick * m` lies in `[2^s, 2^s + tick)`. For
+    /// an on-grid offset `k * tick` the product is `k * (tick * m)`, which lies
+    /// in `[k*2^s, k*2^s + offset)`, so the shift recovers `k` exactly whenever
+    /// `offset < 2^s` -- guaranteed by the span bound the constructor asserts.
+    ///
+    /// An off-grid offset needs no separate argument: whatever index comes
+    /// back, `index * tick` is a multiple of the tick and the offset is not, so
+    /// the equality check in `locate_placed` cannot pass.
+    [[nodiscard]] std::size_t index_of(std::uint64_t offset) const {
+        return static_cast<std::size_t>((offset * reciprocal_) >> shift_);
+    }
+
+    /// Price the window spans, in fixed-point units.
+    [[nodiscard]] std::uint64_t span() const {
+        return static_cast<std::uint64_t>(qty_.size()) * static_cast<std::uint64_t>(tick_);
+    }
+
+    /// Distance from the window's base, as an unsigned value.
+    ///
+    /// The wrap is the point: one unsigned comparison against the span decides
+    /// *both* "below the window" and "above it", and the unplaced base of
+    /// `INT64_MIN` lands far above any span, so a fresh ladder takes the same
+    /// branch a breached one does with no flag to test.
+    [[nodiscard]] std::uint64_t offset_of(std::int64_t price) const {
+        return static_cast<std::uint64_t>(price) - static_cast<std::uint64_t>(base_);
+    }
+
+    /// Where `price` sits, shifting the window if it falls outside.
+    [[nodiscard]] std::size_t locate(std::int64_t price) {
+        if (offset_of(price) >= span()) {
+            rebase(price);
+        }
+        return locate_placed(price);
+    }
+
+    /// `kEmpty` when the price is not on the grid: a venue publishing off-tick
+    /// prices is one whose tick size was configured wrongly, and rounding into
+    /// a neighbouring level would corrupt the book in the way nobody notices.
+    [[nodiscard]] std::size_t locate_placed(std::int64_t price) {
+        const auto offset = offset_of(price);
+        if (offset >= span()) {
+            // Only reachable from the rebase replay, where a level the new
+            // window cannot hold is the caller's to account for.
+            return kEmpty;
+        }
+        const auto index = index_of(offset);
+        if (static_cast<std::uint64_t>(index) * static_cast<std::uint64_t>(tick_) != offset) {
+            ++off_grid_;
+            return kEmpty;
+        }
+        return index;
+    }
+
+    /// Shifts the window onto `price`, carrying live levels across.
+    ///
+    /// Out of line: it runs when the market has walked past an edge, and the
+    /// hot path should not carry its instructions. The shift is the minimum
+    /// that admits the price plus a quarter-window of headroom -- centring
+    /// would discard half the existing coverage every time, and no headroom
+    /// would rebase on every oscillation across the boundary.
+    void rebase(std::int64_t price) {
+        const auto unplaced = base_ == kUnplaced;
+        const auto width = static_cast<std::int64_t>(qty_.size());
+        const auto reach = width * tick_;
+        const auto headroom = (width / 4) * tick_;
+        const auto target = unplaced       ? price - reach / 2
+                            : price < base_ ? price - headroom
+                                            : price - reach + headroom;
+        // Snap to the existing grid so on-grid prices stay on it.
+        const auto shifted =
+            unplaced ? target : base_ + ((target - base_) / tick_) * tick_;
+
+        if (len_ > 0) {
+            std::vector<std::pair<std::int64_t, std::int64_t>> live;
+            live.reserve(len_);
+            for_each_from_touch([&](auto p, auto q) { live.emplace_back(p, q); });
+            std::fill(qty_.begin(), qty_.end(), 0);
+            std::fill(occupied_.begin(), occupied_.end(), 0);
+            len_ = 0;
+            best_ = kEmpty;
+            base_ = shifted;
+            for (const auto& [level_price, level_qty] : live) {
+                const auto index = locate_placed(level_price);
+                if (index == kEmpty) {
+                    // A whole window from where the market now trades: that is
+                    // stale depth, dropped rather than grown into.
+                    ++evicted_;
+                    continue;
+                }
+                qty_[index] = level_qty;
+                occupy(index);
+            }
+        } else {
+            base_ = shifted;
+        }
+        ++rebases_;
+    }
+
+    void occupy(std::size_t index) {
+        occupied_[index / 64] |= 1ULL << (index % 64);
+        ++len_;
+        if (best_ == kEmpty || better(index, best_)) {
+            best_ = index;
+        }
     }
 
     [[nodiscard]] bool better(std::size_t a, std::size_t b) const {
@@ -122,11 +263,7 @@ private:
             return; // quantity changed, occupancy did not
         }
         if (now > 0) {
-            occupied_[index / 64] |= 1ULL << (index % 64);
-            ++len_;
-            if (best_ == kEmpty || better(index, best_)) {
-                best_ = index;
-            }
+            occupy(index);
         } else {
             occupied_[index / 64] &= ~(1ULL << (index % 64));
             --len_;
@@ -170,11 +307,19 @@ private:
 
     std::vector<std::int64_t> qty_;
     std::vector<std::uint64_t> occupied_;
-    std::int64_t floor_;
+    /// Price at index zero, `kUnplaced` until the first price decides where
+    /// the window sits. Moves when the market leaves it.
+    static constexpr std::int64_t kUnplaced = INT64_MIN;
+    std::int64_t base_{kUnplaced};
     std::int64_t tick_;
+    unsigned shift_;
+    std::uint64_t reciprocal_;
     std::size_t best_{kEmpty};
     bool descending_;
     std::size_t len_{0};
+    std::uint64_t rebases_{0};
+    std::uint64_t off_grid_{0};
+    std::uint64_t evicted_{0};
 };
 
 class OrderMap final {

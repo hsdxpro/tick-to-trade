@@ -7,7 +7,11 @@
 #include "../feed/itch.hpp"
 #include "../feed/synth.hpp"
 
+#include <algorithm>
 #include <cstdio>
+#include <deque>
+#include <map>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -26,7 +30,7 @@ int failures = 0;
     } while (0)
 
 /// The band the ITCH generator's mid-walk stays inside, in price units.
-constexpr Band kItchBand{(1'000'000 - 3'200) * 10'000LL, 100 * 10'000LL, 5'070};
+constexpr Band kItchBand{100 * 10'000LL, 4'096};
 
 bool agree(const Books& books, const ReferenceBooks& reference, std::size_t at_event) {
     for (std::size_t index = 0; index < reference.symbols.size(); ++index) {
@@ -125,11 +129,140 @@ void order_map_survives_churn_against_unordered_map() {
     }
 }
 
+/// One ladder, three instruments that share nothing: a penny-tick equity near
+/// $30, a cent-tick perpetual near $100,000, and a satoshi-tick pair near
+/// $0.30. None declares a range, and each is walked with enough drift to drag
+/// the window across dozens of its own widths.
+///
+/// Liquidity is aged out behind the touch the way a real book cancels it, so
+/// the live set never falls a window behind and nothing is ever evicted. That
+/// matters: eviction is lossy by design, and a test that tolerated it would be
+/// comparing against a reference it had licence to disagree with. Here the
+/// agreement is exact, every level, after every window the market crossed.
+void one_ladder_serves_any_asset_and_any_tick() {
+    struct Instrument {
+        const char* name;
+        std::int64_t tick;
+        std::int64_t start;
+    };
+    // Prices in fixed point: 1e-4 for the equity and perp, 1e-8 for the pair.
+    constexpr Instrument kInstruments[] = {
+        {"equity, penny tick, $30", 100, 30 * 10'000LL},
+        {"perp, cent tick, $100k", 100, 100'000 * 10'000LL},
+        {"pair, satoshi tick, $0.30", 1, 30'000'000LL},
+    };
+    constexpr std::size_t kLive = 400; // resting levels before the oldest is pulled
+
+    for (const auto& instrument : kInstruments) {
+        Ladder ladder = Ladder::bids(Band{instrument.tick, 4'096});
+        std::map<std::int64_t, std::int64_t> reference;
+        std::deque<std::int64_t> resting;
+        Rng rng{kGeneratorSeed ^ 0x5d};
+
+        auto mid = instrument.start;
+        for (int step = 0; step < 100'000; ++step) {
+            // A drifting walk: two ticks a step on average, so 100,000 steps
+            // carry the touch about fifty window widths from where it began.
+            mid += (static_cast<std::int64_t>(rng.below(17)) - 6) * instrument.tick;
+            const auto price =
+                mid - static_cast<std::int64_t>(rng.below(64)) * instrument.tick;
+            const auto qty = static_cast<std::int64_t>(1 + rng.below(500));
+            ladder.set(price, qty);
+            reference[price] = qty;
+            resting.push_back(price);
+
+            while (resting.size() > kLive) {
+                const auto stale = resting.front();
+                resting.pop_front();
+                // Only pull it if no later step refreshed the same price.
+                if (std::find(resting.begin(), resting.end(), stale) == resting.end()) {
+                    ladder.set(stale, 0);
+                    reference.erase(stale);
+                }
+            }
+        }
+
+        REQUIRE(ladder.off_grid() == 0);
+        REQUIRE(ladder.evicted() == 0);
+        std::vector<std::pair<std::int64_t, std::int64_t>> got;
+        ladder.for_each_from_touch([&](auto p, auto q) { got.emplace_back(p, q); });
+        const std::vector<std::pair<std::int64_t, std::int64_t>> want(reference.rbegin(),
+                                                                      reference.rend());
+        if (got != want) {
+            ++failures;
+            std::printf("FAIL: %s diverged: %zu levels against the reference's %zu\n",
+                        instrument.name, got.size(), want.size());
+        }
+        // Without this the test would pass on a ladder that never moved.
+        if (ladder.rebases() < 10) {
+            ++failures;
+            std::printf("FAIL: %s crossed only %llu windows\n", instrument.name,
+                        static_cast<unsigned long long>(ladder.rebases()));
+        }
+    }
+}
+
+/// A deep book that follows the market keeps its depth.
+///
+/// This is the test that decides how the window moves. Centring it on the new
+/// price is the obvious choice and the wrong one: it discards everything more
+/// than half a window away, and a venue publishing full depth has most of its
+/// book sitting exactly there. Shifting the minimum that admits the price,
+/// plus a quarter window of hysteresis, keeps all of it.
+///
+/// 2,500 levels in a 4,096-tick window -- the shape of a full-depth feed --
+/// walked five thousand ticks, further than the window is wide.
+void a_deep_book_keeps_its_depth_as_the_market_moves() {
+    constexpr std::int64_t kDepth = 2'500;
+    Ladder ladder = Ladder::bids(Band{1, 4'096});
+    std::map<std::int64_t, std::int64_t> reference;
+    std::int64_t touch = 1'000'000;
+
+    for (std::int64_t level = 0; level < kDepth; ++level) {
+        ladder.set(touch - level, 10 + level);
+        reference[touch - level] = 10 + level;
+    }
+
+    for (int sweep = 0; sweep < 50; ++sweep) {
+        for (int step = 0; step < 100; ++step) {
+            ++touch;
+            ladder.set(touch, 10);
+            reference[touch] = 10;
+            ladder.set(touch - kDepth, 0);
+            reference.erase(touch - kDepth);
+        }
+        REQUIRE(ladder.evicted() == 0);
+        if (failures != 0) return;
+    }
+
+    std::vector<std::pair<std::int64_t, std::int64_t>> got;
+    ladder.for_each_from_touch([&](auto p, auto q) { got.emplace_back(p, q); });
+    const std::vector<std::pair<std::int64_t, std::int64_t>> want(reference.rbegin(),
+                                                                  reference.rend());
+    REQUIRE(got == want);
+    REQUIRE(ladder.rebases() >= 2);
+}
+
+/// A price off the tick grid is refused and counted, not folded into the
+/// neighbouring level -- the failure mode nobody notices until the book is
+/// wrong and there is nothing to point at.
+void an_off_grid_price_is_refused_rather_than_rounded() {
+    Ladder ladder = Ladder::asks(Band{100, 4'096});
+    ladder.set(10'000, 5);
+    ladder.set(10'050, 7); // half a tick
+    REQUIRE(ladder.off_grid() == 1);
+    REQUIRE(ladder.depth() == 1);
+    REQUIRE(ladder.best() == std::make_pair(std::int64_t{10'000}, std::int64_t{5}));
+}
+
 } // namespace
 
 int main() {
     books_agree_across_a_quarter_million_events();
     order_map_survives_churn_against_unordered_map();
+    one_ladder_serves_any_asset_and_any_tick();
+    a_deep_book_keeps_its_depth_as_the_market_moves();
+    an_off_grid_price_is_refused_rather_than_rounded();
     if (failures == 0) {
         std::printf("book: all tests passed\n");
         return 0;

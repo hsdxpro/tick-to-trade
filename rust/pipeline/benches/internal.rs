@@ -18,7 +18,9 @@
 
 use std::time::Instant;
 use t2t_feed::Parser;
+use t2t_feed::mold::{Admit, Arbitrator, HEADER_LEN, Header};
 use t2t_feed::synth::TRADFI;
+use t2t_pipeline::probe::Probes;
 use t2t_pipeline::{BAND, BboUpdate, FeedStage, OrderCommand, Strategy, probe};
 
 const PROBES: usize = 100_000;
@@ -37,11 +39,9 @@ fn report(name: &str, samples: &mut [u64]) {
 
 fn probes() -> Vec<Vec<u8>> {
     let mut out = Vec::with_capacity(PROBES + WARMUP);
-    let mut previous = None;
-    for index in 0..PROBES + WARMUP {
-        let order = index as u64 + 1;
-        out.push(probe::datagram(previous, order, probe::price_of(index)));
-        previous = Some(order);
+    let mut stream = Probes::new();
+    for _ in 0..PROBES + WARMUP {
+        out.push(stream.next_datagram());
     }
     out
 }
@@ -52,12 +52,18 @@ fn compute_path() {
     let parser = t2t_feed::itch::Itch { symbols: TRADFI };
     let mut feed = FeedStage::new(TRADFI.len(), BAND);
     let mut strategy = Strategy::default();
+    let mut arbitrator = Arbitrator::new(probe::SESSION, probe::FIRST_SEQUENCE);
     let mut samples = Vec::with_capacity(PROBES);
     let mut orders = 0_u64;
 
     for (index, datagram) in datagrams.iter().enumerate() {
         let started = Instant::now();
-        parser.parse(datagram, &mut feed).unwrap();
+        let header = Header::parse(datagram).unwrap();
+        assert_eq!(
+            arbitrator.admit(&header, &datagram[HEADER_LEN..]),
+            Admit::Deliver
+        );
+        parser.parse(&datagram[HEADER_LEN..], &mut feed).unwrap();
         if let Some(update) = feed.take_moved()
             && let Some(order) = strategy.decide(&update)
         {
@@ -86,6 +92,7 @@ fn staged_path() {
     let feed = std::thread::spawn(move || {
         let parser = t2t_feed::itch::Itch { symbols: TRADFI };
         let mut stage = FeedStage::new(TRADFI.len(), BAND);
+        let mut arbitrator = Arbitrator::new(probe::SESSION, probe::FIRST_SEQUENCE);
         for _ in 0..PROBES + WARMUP {
             let (index, t0) = loop {
                 if let Some(item) = feed_in.try_pop() {
@@ -93,7 +100,13 @@ fn staged_path() {
                 }
                 std::hint::spin_loop();
             };
-            parser.parse(&feed_data[index], &mut stage).unwrap();
+            let datagram = &feed_data[index];
+            let header = Header::parse(datagram).unwrap();
+            assert_eq!(
+                arbitrator.admit(&header, &datagram[HEADER_LEN..]),
+                Admit::Deliver
+            );
+            parser.parse(&datagram[HEADER_LEN..], &mut stage).unwrap();
             if let Some(update) = stage.take_moved() {
                 let mut item = (update, t0);
                 while let Err(back) = to_strategy.try_push(item) {

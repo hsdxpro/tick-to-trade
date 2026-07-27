@@ -18,7 +18,7 @@ using namespace t2t::book;
 
 constexpr std::size_t kMessages = 1'000'000;
 constexpr int kRuns = 3;
-constexpr Band kItchBand{(1'000'000 - 3'200) * 10'000LL, 100 * 10'000LL, 5'070};
+constexpr Band kItchBand{100 * 10'000LL, 4'096};
 
 double timed(auto&& run) {
     double best = 1e300;

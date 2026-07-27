@@ -62,6 +62,8 @@ pub struct Session {
     peer_timeout: Duration,
     last_sent: Instant,
     last_heard: Instant,
+    /// Something went out since the last poll; see [`Session::prepare`].
+    sent_since_poll: bool,
     heartbeats_sent: u64,
     resends: u64,
 }
@@ -89,6 +91,7 @@ impl Session {
             peer_timeout,
             last_sent: now,
             last_heard: now,
+            sent_since_poll: false,
             heartbeats_sent: 0,
             resends: 0,
         }
@@ -96,23 +99,32 @@ impl Session {
 
     /// Stamps and retains an order, returning the bytes to write.
     ///
+    /// **No clock read.** A send resets the heartbeat timer, but a heartbeat
+    /// interval is measured in seconds and `Instant::now` costs tens of
+    /// nanoseconds on the order path — a bad trade at any interval. So a send
+    /// only raises a flag, and [`Self::due`], which reads the clock anyway
+    /// because it must, folds the flag in. The heartbeat can therefore be
+    /// postponed by at most one poll interval, which is microseconds against
+    /// an interval of seconds, and it errs toward *not* sending a redundant
+    /// heartbeat rather than toward missing a needed one.
+    ///
     /// `None` when too many are unacknowledged: the ring would overwrite a
     /// message the venue may still ask for, and losing the ability to resend
     /// is worse than refusing to send. The caller sheds or waits.
     #[inline]
-    pub fn prepare(&mut self, order: &OrderCommand, now: Instant) -> Option<&[u8; ORDER_WIRE_LEN]> {
+    pub fn prepare(&mut self, order: &OrderCommand) -> Option<&[u8; ORDER_WIRE_LEN]> {
         if self.in_flight() >= RETAIN as u64 {
             return None;
         }
         let sequence = self.next_sequence;
         let slot = (sequence as usize) & (RETAIN - 1);
-        // The sequence rides in the order id's high bits: the venue echoes it
-        // back on acknowledgement, and no extra wire field is needed.
+        // The sequence rides in the client order id: the venue echoes it back
+        // on acknowledgement, so no extra wire field is needed.
         let mut stamped = *order;
         stamped.client_order_id = sequence;
         self.retained[slot] = stamped.encode();
         self.next_sequence += 1;
-        self.last_sent = now;
+        self.sent_since_poll = true;
         Some(&self.retained[slot])
     }
 
@@ -134,10 +146,14 @@ impl Session {
         self.next_sequence - 1 - self.acknowledged
     }
 
-    /// What is due, given the time. One clock read by the caller's existing
-    /// loop, two comparisons here.
-    #[must_use]
-    pub fn due(&self, now: Instant) -> Action {
+    /// What is due, given the time. Called from the idle path, which is where
+    /// the clock read belongs: two comparisons, and the folding-in of any send
+    /// that happened since the last poll.
+    pub fn due(&mut self, now: Instant) -> Action {
+        if self.sent_since_poll {
+            self.sent_since_poll = false;
+            self.last_sent = now;
+        }
         if now.duration_since(self.last_heard) >= self.peer_timeout {
             return Action::PeerIsDead;
         }
@@ -209,7 +225,7 @@ mod tests {
         let now = Instant::now();
         let mut session = session(now);
         for expected in 1..=5_u64 {
-            let bytes = *session.prepare(&order(), now).unwrap();
+            let bytes = *session.prepare(&order()).unwrap();
             let decoded = OrderCommand::decode(&bytes).unwrap();
             assert_eq!(decoded.client_order_id, expected);
         }
@@ -221,7 +237,7 @@ mod tests {
         let now = Instant::now();
         let mut session = session(now);
         for _ in 0..10 {
-            session.prepare(&order(), now).unwrap();
+            session.prepare(&order()).unwrap();
         }
         session.received(Inbound::Acknowledged(7), now);
         assert_eq!(session.in_flight(), 3);
@@ -234,7 +250,7 @@ mod tests {
         let now = Instant::now();
         let mut session = session(now);
         for _ in 0..10 {
-            session.prepare(&order(), now).unwrap();
+            session.prepare(&order()).unwrap();
         }
         let mut replayed = Vec::new();
         assert!(session.resend_from(4, |bytes| {
@@ -248,9 +264,9 @@ mod tests {
         let now = Instant::now();
         let mut session = session(now);
         for _ in 0..(RETAIN + 10) {
-            if session.prepare(&order(), now).is_none() {
+            if session.prepare(&order()).is_none() {
                 session.received(Inbound::Acknowledged(session.next_sequence - 1), now);
-                session.prepare(&order(), now).unwrap();
+                session.prepare(&order()).unwrap();
             }
         }
         assert!(
@@ -264,14 +280,14 @@ mod tests {
         let now = Instant::now();
         let mut session = session(now);
         for _ in 0..RETAIN {
-            assert!(session.prepare(&order(), now).is_some());
+            assert!(session.prepare(&order()).is_some());
         }
         assert!(
-            session.prepare(&order(), now).is_none(),
+            session.prepare(&order()).is_none(),
             "an unacknowledged message was about to be overwritten"
         );
         session.received(Inbound::Acknowledged(1), now);
-        assert!(session.prepare(&order(), now).is_some());
+        assert!(session.prepare(&order()).is_some());
     }
 
     #[test]

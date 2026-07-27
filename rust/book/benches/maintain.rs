@@ -6,9 +6,8 @@ use std::time::Instant;
 use t2t_book::{Band, Books, reference::ReferenceBooks};
 
 const ITCH_BAND: Band = Band {
-    floor: (1_000_000 - 3_200) * 10_000,
     tick: 100 * 10_000,
-    ticks: 5_070,
+    ticks: 4_096,
 };
 use t2t_feed::{Event, GENERATOR_SEED, Parser, Rng, Sink, synth};
 

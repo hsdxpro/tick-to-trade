@@ -22,7 +22,7 @@ using feed::Event;
 using feed::Side;
 
 /// The band the harness's probes stay inside.
-inline constexpr Band kBand{(1'000'000 - 3'200) * 10'000LL, 100 * 10'000LL, 5'070};
+inline constexpr Band kBand{100 * 10'000LL, 4'096};
 
 struct BboUpdate {
     std::uint16_t symbol{0};

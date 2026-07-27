@@ -11,9 +11,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 use t2t_book::{Ladder, Order, OrderMap};
 
-const FLOOR: i64 = (1_000_000 - 3_200) * 10_000;
-const TICK: i64 = 100 * 10_000;
-const TICKS: usize = 5_070;
+const GRID: t2t_book::Band = t2t_book::Band {
+    tick: 100 * 10_000,
+    ticks: 4_096,
+};
 use t2t_feed::{Event, GENERATOR_SEED, Kind, Parser, Rng, Side, Sink, synth};
 
 const MESSAGES: usize = 1_000_000;
@@ -159,10 +160,7 @@ fn main() {
     measure("ladder: custom banded bitmap", || {
         let mut sides: Vec<[Ladder; 2]> = (0..4)
             .map(|_| {
-                [
-                    Ladder::bids(FLOOR, TICK, TICKS),
-                    Ladder::asks(FLOOR, TICK, TICKS),
-                ]
+                [Ladder::bids(GRID), Ladder::asks(GRID)]
             })
             .collect();
         for op in &ladder_ops {

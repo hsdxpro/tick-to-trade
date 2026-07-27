@@ -42,24 +42,31 @@ private:
         Bytes bytes;
         std::size_t at;
 
-        [[nodiscard]] std::optional<std::uint8_t> peek() const {
-            return at < bytes.size() ? std::optional{feed::at(bytes, at)} : std::nullopt;
-        }
+        /// Bounds check and read, kept as two operations.
+        ///
+        /// The obvious `std::optional<std::uint8_t> peek()` costs an optional
+        /// construction on *every byte inspected*, and a scanner inspects
+        /// every byte of every message. Measured, that was the whole of this
+        /// parser's deficit against its Rust twin. The pair below carries the
+        /// same information and compiles to a compare and a load.
+        [[nodiscard]] bool done() const { return at >= bytes.size(); }
+
+        /// Precondition: `!done()`.
+        [[nodiscard]] std::uint8_t current() const { return feed::at(bytes, at); }
 
         void skip_ws() {
-            while (true) {
-                const auto byte = peek();
-                if (byte == ' ' || byte == '\t' || byte == '\r') {
-                    ++at;
-                } else {
+            while (!done()) {
+                const auto byte = current();
+                if (byte != ' ' && byte != '\t' && byte != '\r') {
                     return;
                 }
+                ++at;
             }
         }
 
         bool expect(std::uint8_t byte) {
             skip_ws();
-            if (peek() == byte) {
+            if (!done() && current() == byte) {
                 ++at;
                 return true;
             }
@@ -73,14 +80,14 @@ private:
             if (!expect('"')) return false;
             const std::size_t from = at;
             for (;;) {
-                const auto byte = peek();
-                if (!byte) return false;
-                if (*byte == '"') {
+                if (done()) return false;
+                const auto byte = current();
+                if (byte == '"') {
                     out = {reinterpret_cast<const char*>(bytes.data() + from), at - from};
                     ++at;
                     return true;
                 }
-                if (*byte == '\\') return false;
+                if (byte == '\\') return false;
                 ++at;
             }
         }
@@ -89,40 +96,40 @@ private:
         /// schema does not need.
         bool skip_value() {
             skip_ws();
-            const auto first = peek();
-            if (!first) return false;
-            if (*first == '"') {
+            if (done()) return false;
+            const auto first = current();
+            if (first == '"') {
                 std::string_view ignored;
                 return string(ignored);
             }
-            if (*first == '{' || *first == '[') {
+            if (first == '{' || first == '[') {
                 int depth = 0;
                 bool in_string = false;
                 for (;;) {
-                    const auto byte = peek();
-                    if (!byte) return false;
+                    if (done()) return false;
+                    const auto byte = current();
                     ++at;
                     if (in_string) {
-                        if (*byte == '\\') {
+                        if (byte == '\\') {
                             ++at;
-                        } else if (*byte == '"') {
+                        } else if (byte == '"') {
                             in_string = false;
                         }
-                    } else if (*byte == '"') {
+                    } else if (byte == '"') {
                         in_string = true;
-                    } else if (*byte == '{' || *byte == '[') {
+                    } else if (byte == '{' || byte == '[') {
                         ++depth;
-                    } else if (*byte == '}' || *byte == ']') {
+                    } else if (byte == '}' || byte == ']') {
                         if (--depth == 0) return true;
                     }
                 }
             }
-            while (true) {
-                const auto byte = peek();
-                if (!byte) return false;
-                if (*byte == ',' || *byte == '}' || *byte == ']') return true;
+            while (!done()) {
+                const auto byte = current();
+                if (byte == ',' || byte == '}' || byte == ']') return true;
                 ++at;
             }
+            return false;
         }
 
         /// "1234.5678": a decimal in a string, scaled during the scan.
@@ -183,7 +190,8 @@ private:
                 if (!scan.quoted_decimal(kQtyScale, qty)) return Error::Malformed;
             } else if (key == "m") {
                 scan.skip_ws();
-                const auto byte = scan.peek();
+                if (scan.done()) return Error::Malformed;
+                const auto byte = scan.current();
                 if (byte == 't') {
                     scan.at += 4;
                     maker_is_buyer = true;
@@ -196,10 +204,10 @@ private:
             } else if (key == "t") {
                 scan.skip_ws();
                 std::uint64_t id = 0;
-                while (true) {
-                    const auto byte = scan.peek();
-                    if (!byte || *byte < '0' || *byte > '9') break;
-                    id = id * 10 + (*byte - '0');
+                while (!scan.done()) {
+                    const auto byte = scan.current();
+                    if (byte < '0' || byte > '9') break;
+                    id = id * 10 + (byte - '0');
                     ++scan.at;
                 }
                 trade_id = id;
@@ -208,7 +216,7 @@ private:
                 const Side side = key == "b" ? Side::Bid : Side::Ask;
                 if (!scan.expect('[')) return Error::Malformed;
                 scan.skip_ws();
-                while (scan.peek() != ']') {
+                while (!scan.done() && scan.current() != ']') {
                     if (!scan.expect('[')) return Error::Malformed;
                     Event event{};
                     event.kind = Kind::Level;
@@ -220,18 +228,20 @@ private:
                     if (!scan.expect(']')) return Error::Malformed;
                     sink(event);
                     scan.skip_ws();
-                    if (scan.peek() == ',') {
+                    if (!scan.done() && scan.current() == ',') {
                         ++scan.at;
                         scan.skip_ws();
                     }
                 }
+                if (scan.done()) return Error::Malformed;
                 ++scan.at; // the ']'
             } else {
                 if (!scan.skip_value()) return Error::Malformed;
             }
 
             scan.skip_ws();
-            const auto byte = scan.peek();
+            if (scan.done()) return Error::Malformed;
+            const auto byte = scan.current();
             if (byte == ',') {
                 ++scan.at;
             } else if (byte == '}') {

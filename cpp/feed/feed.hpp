@@ -5,8 +5,10 @@
 // scales, same generator seed producing byte-identical streams, so the
 // benchmark numbers compare parsers rather than workloads.
 
+#include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -68,17 +70,32 @@ using Bytes = std::span<const std::byte>;
     return static_cast<std::uint8_t>(b[i]);
 }
 
+/// A big-endian field: one unaligned load and a byte swap.
+///
+/// The form this replaced shifted and OR'd each byte into place: eight loads
+/// and seven shifts written out for a 64-bit field, on the assumption the
+/// compiler would fold them back. Measuring said it already did -- the change
+/// was worth about 2% -- so this stands on saying what it means rather than on
+/// the speed. `std::byteswap` is C++23 and names the operation; the `memcpy` is
+/// the only strictly-conforming way to reinterpret the bytes, and every
+/// compiler folds it into the one load it describes.
+template <typename T>
+[[nodiscard]] inline T be(Bytes b, std::size_t i) {
+    T value{};
+    std::memcpy(&value, b.data() + i, sizeof(T));
+    return std::byteswap(value);
+}
+
 [[nodiscard]] inline std::uint16_t be16(Bytes b, std::size_t i) {
-    return static_cast<std::uint16_t>((at(b, i) << 8) | at(b, i + 1));
+    return be<std::uint16_t>(b, i);
 }
 
 [[nodiscard]] inline std::uint32_t be32(Bytes b, std::size_t i) {
-    return (std::uint32_t{at(b, i)} << 24) | (std::uint32_t{at(b, i + 1)} << 16)
-         | (std::uint32_t{at(b, i + 2)} << 8) | std::uint32_t{at(b, i + 3)};
+    return be<std::uint32_t>(b, i);
 }
 
 [[nodiscard]] inline std::uint64_t be64(Bytes b, std::size_t i) {
-    return (std::uint64_t{be32(b, i)} << 32) | std::uint64_t{be32(b, i + 4)};
+    return be<std::uint64_t>(b, i);
 }
 
 /// A handful of symbols, linear scan: a hash costs more than it saves at this

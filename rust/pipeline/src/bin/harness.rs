@@ -17,10 +17,10 @@
 //! harness [--feed 127.0.0.1:9701] [--orders 127.0.0.1:9702] [--probes 20000]
 //! ```
 
-use std::io::{ErrorKind, Read};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, UdpSocket};
 use std::time::Instant;
-use t2t_pipeline::{ORDER_WIRE_LEN, probe};
+use t2t_pipeline::{ORDER_WIRE_LEN, OrderCommand, probe::Probes};
 
 fn argument(name: &str, default: &str) -> String {
     let mut arguments = std::env::args().skip(1);
@@ -49,13 +49,14 @@ fn main() -> std::io::Result<()> {
     let mut samples = Vec::with_capacity(probes);
     let mut scratch = [0_u8; ORDER_WIRE_LEN];
     let warmup = probes / 10;
-    let mut previous: Option<u64> = None;
+    let mut stream = Probes::new();
+    // The venue's side of the order session: acknowledge in batches, as a real
+    // one does, so the engine's retain window drains and its send path is
+    // exercised rather than stalled.
+    const ACKNOWLEDGE_EVERY: usize = 256;
 
     for index in 0..probes + warmup {
-        let price = probe::price_of(index);
-        let order = index as u64 + 1;
-        let datagram = probe::datagram(previous, order, price);
-        previous = Some(order);
+        let datagram = stream.next_datagram();
 
         let started = Instant::now();
         socket.send(&datagram)?;
@@ -72,6 +73,12 @@ fn main() -> std::io::Result<()> {
             }
         }
         let elapsed = started.elapsed();
+        // Acknowledgement is off the measured path: T1 is already taken.
+        if (index + 1).is_multiple_of(ACKNOWLEDGE_EVERY) {
+            let acknowledged =
+                OrderCommand::decode(&scratch).map_or(0, |order| order.client_order_id);
+            orders.write_all(&acknowledged.to_le_bytes())?;
+        }
         if index >= warmup {
             samples.push(elapsed.as_nanos() as u64);
         }
