@@ -43,6 +43,13 @@ add_test(NAME t2t_test_spsc COMMAND t2t_test_spsc)
 add_executable(t2t_bench_spsc bench/bench_spsc.cpp)
 target_link_libraries(t2t_bench_spsc PRIVATE t2t)
 
+add_executable(t2t_test_feed tests/test_feed.cpp)
+target_link_libraries(t2t_test_feed PRIVATE t2t)
+add_test(NAME t2t_test_feed COMMAND t2t_test_feed)
+
+add_executable(t2t_bench_feed bench/bench_feed.cpp)
+target_link_libraries(t2t_bench_feed PRIVATE t2t)
+
 find_package(Threads REQUIRED)
 target_link_libraries(t2t_test_spsc PRIVATE Threads::Threads)
 target_link_libraries(t2t_bench_spsc PRIVATE Threads::Threads)

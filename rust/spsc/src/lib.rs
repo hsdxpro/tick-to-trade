@@ -117,7 +117,10 @@ pub struct Consumer<T> {
 /// If `capacity` is zero.
 #[must_use]
 pub fn channel<T>(capacity: usize) -> (Producer<T>, Consumer<T>) {
-    assert!(capacity > 0, "a zero-capacity ring can never accept an item");
+    assert!(
+        capacity > 0,
+        "a zero-capacity ring can never accept an item"
+    );
     let capacity = capacity.next_power_of_two();
 
     #[cfg(not(loom))]

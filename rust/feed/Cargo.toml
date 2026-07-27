@@ -1,25 +1,21 @@
 [package]
-name = "t2t-spsc"
+name = "t2t-feed"
 version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
 
 [dependencies]
 
-[target.'cfg(loom)'.dependencies]
-loom = "0.7"
-
 [dev-dependencies]
-crossbeam-queue = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [[bench]]
-name = "throughput"
+name = "parse"
 harness = false
 
 [lints.rust]
 missing_debug_implementations = "deny"
-# loom is driven by RUSTFLAGS=--cfg loom, invisible to check-cfg otherwise.
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
 
 [lints.clippy]
 all = { level = "deny", priority = -1 }
