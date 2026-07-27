@@ -250,15 +250,15 @@ impl Ladder {
         } else {
             price - span + headroom
         };
-        // Snap to the existing grid so on-grid prices stay on it.
+        // Snap to the existing grid so on-grid prices stay on it. The snap
+        // cannot land back on the current base: a breach is at least a full
+        // span away from the far edge, and the headroom is at least one tick
+        // by the width the constructor requires, so the move is never zero.
         let new_base = if self.base == i64::MIN {
             target
         } else {
             self.base + ((target - self.base) / self.tick) * self.tick
         };
-        if new_base == self.base {
-            return;
-        }
 
         if self.len > 0 {
             // Collect the live levels, then replace them relative to the new
