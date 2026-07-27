@@ -1,0 +1,8 @@
+/rust/target/
+/cpp/build/
+/cpp/build-*/
+*.obj
+*.pdb
+*.exe
+.vs/
+.vscode/

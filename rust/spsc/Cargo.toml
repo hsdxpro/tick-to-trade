@@ -1,0 +1,23 @@
+[package]
+name = "t2t-spsc"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
+[dev-dependencies]
+crossbeam-queue = "0.3"
+
+[[bench]]
+name = "throughput"
+harness = false
+
+[lints.rust]
+missing_debug_implementations = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }

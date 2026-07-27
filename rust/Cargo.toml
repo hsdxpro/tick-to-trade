@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["spsc"]
+
+[workspace.package]
+edition = "2024"
+publish = false
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = true
+
+[profile.loom]
+inherits = "test"
+opt-level = 2
