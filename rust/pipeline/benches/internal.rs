@@ -58,11 +58,11 @@ fn compute_path() {
     for (index, datagram) in datagrams.iter().enumerate() {
         let started = Instant::now();
         parser.parse(datagram, &mut feed).unwrap();
-        if let Some(update) = feed.take_moved() {
-            if let Some(order) = strategy.decide(&update) {
-                let encoded = order.encode();
-                orders += u64::from(encoded[0]) + 1;
-            }
+        if let Some(update) = feed.take_moved()
+            && let Some(order) = strategy.decide(&update)
+        {
+            let encoded = order.encode();
+            orders += u64::from(encoded[0]) + 1;
         }
         let elapsed = started.elapsed();
         if index >= WARMUP {
