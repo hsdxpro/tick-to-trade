@@ -128,6 +128,7 @@ private:
           tick_(band.tick),
           shift_(63 - static_cast<unsigned>(std::bit_width(band.ticks - 1))),
           reciprocal_(ceil_div(1ULL << shift_, static_cast<std::uint64_t>(band.tick))),
+          span_(static_cast<std::uint64_t>(band.ticks) * static_cast<std::uint64_t>(band.tick)),
           descending_(descending) {
         // Four levels is what makes the quarter-window headroom at least one
         // tick, which is what guarantees a rebase always moves the base.
@@ -155,14 +156,9 @@ private:
     ///
     /// An off-grid offset needs no separate argument: whatever index comes
     /// back, `index * tick` is a multiple of the tick and the offset is not, so
-    /// the equality check in `locate_placed` cannot pass.
+    /// the equality check in `index_at` cannot pass.
     [[nodiscard]] std::size_t index_of(std::uint64_t offset) const {
         return static_cast<std::size_t>((offset * reciprocal_) >> shift_);
-    }
-
-    /// Price the window spans, in fixed-point units.
-    [[nodiscard]] std::uint64_t span() const {
-        return static_cast<std::uint64_t>(qty_.size()) * static_cast<std::uint64_t>(tick_);
     }
 
     /// Distance from the window's base, as an unsigned value.
@@ -176,29 +172,41 @@ private:
     }
 
     /// Where `price` sits, shifting the window if it falls outside.
+    ///
+    /// The offset is computed once. Routing this through `locate_placed` read
+    /// `base_` and recomputed the span a second time on every message, to
+    /// re-answer a question this branch had just answered.
     [[nodiscard]] std::size_t locate(std::int64_t price) {
-        if (offset_of(price) >= span()) {
+        auto offset = offset_of(price);
+        if (offset >= span_) {
             rebase(price);
+            offset = offset_of(price);
         }
-        return locate_placed(price);
+        return index_at(offset);
     }
 
-    /// `kEmpty` when the price is not on the grid: a venue publishing off-tick
-    /// prices is one whose tick size was configured wrongly, and rounding into
-    /// a neighbouring level would corrupt the book in the way nobody notices.
-    [[nodiscard]] std::size_t locate_placed(std::int64_t price) {
-        const auto offset = offset_of(price);
-        if (offset >= span()) {
-            // Only reachable from the rebase replay, where a level the new
-            // window cannot hold is the caller's to account for.
-            return kEmpty;
-        }
+    /// The index for an offset already known to be inside the window.
+    [[nodiscard]] std::size_t index_at(std::uint64_t offset) {
         const auto index = index_of(offset);
         if (static_cast<std::uint64_t>(index) * static_cast<std::uint64_t>(tick_) != offset) {
             ++off_grid_;
             return kEmpty;
         }
         return index;
+    }
+
+    /// `kEmpty` when the price is not on the grid: a venue publishing off-tick
+    /// prices is one whose tick size was configured wrongly, and rounding into
+    /// a neighbouring level would corrupt the book in the way nobody notices.
+    /// Where a price sits, or `kEmpty` if the window cannot hold it. Only the
+    /// rebase replay calls this: it is the one caller whose prices may fall
+    /// outside, so the one that needs a bounds check the hot path already did.
+    [[nodiscard]] std::size_t locate_placed(std::int64_t price) {
+        const auto offset = offset_of(price);
+        if (offset >= span_) {
+            return kEmpty;
+        }
+        return index_at(offset);
     }
 
     /// Shifts the window onto `price`, carrying live levels across.
@@ -314,6 +322,9 @@ private:
     std::int64_t tick_;
     unsigned shift_;
     std::uint64_t reciprocal_;
+    /// Price the window spans. `ticks * tick`, and neither changes, so it is
+    /// stored rather than recomputed on a path that runs per message.
+    std::uint64_t span_;
     std::size_t best_{kEmpty};
     bool descending_;
     std::size_t len_{0};

@@ -95,6 +95,9 @@ pub struct Ladder {
     /// `ceil(2^shift / tick)`, the divide's replacement.
     reciprocal: u64,
     shift: u32,
+    /// Price the window spans. `ticks * tick`, and neither ever changes, so it
+    /// is stored rather than recomputed on a path that runs per message.
+    span: u64,
     /// Tick index of the best level, or `usize::MAX` when empty.
     best: usize,
     /// Bids' best is the highest occupied index; asks' the lowest.
@@ -151,6 +154,7 @@ impl Ladder {
             tick: band.tick,
             reciprocal: (1_u64 << shift).div_ceil(band.tick as u64),
             shift,
+            span: band.ticks as u64 * band.tick as u64,
             best: Self::EMPTY,
             descending,
             len: 0,
@@ -170,7 +174,7 @@ impl Ladder {
     ///
     /// An off-grid offset needs no separate argument: whatever index comes
     /// back, `index * tick` is a multiple of the tick and the offset is not, so
-    /// the equality check in [`Ladder::locate_placed`] cannot pass.
+    /// the equality check in [`Ladder::index_at`] cannot pass.
     #[inline]
     fn index_of(&self, offset: u64) -> usize {
         ((offset * self.reciprocal) >> self.shift) as usize
@@ -184,10 +188,28 @@ impl Ladder {
     /// the way nobody notices. It is counted and refused.
     #[inline]
     fn locate(&mut self, price: i64) -> Option<usize> {
-        if self.offset_of(price) >= self.span() {
+        // The offset is computed once. Routing this through `locate_placed`
+        // read `base` and recomputed the span a second time on every message,
+        // to re-answer a question this branch had just answered.
+        let mut offset = self.offset_of(price);
+        if offset >= self.span {
             self.rebase(price);
+            offset = self.offset_of(price);
         }
-        self.locate_placed(price)
+        self.index_at(offset)
+    }
+
+    /// The index for an offset already known to be inside the window.
+    #[inline]
+    fn index_at(&mut self, offset: u64) -> Option<usize> {
+        let index = self.index_of(offset);
+        // The multiply is exact only for on-grid offsets, so this check is
+        // both the grid validation and the proof the index is right.
+        if index * (self.tick as usize) != offset as usize {
+            self.off_grid += 1;
+            return None;
+        }
+        Some(index)
     }
 
     /// Distance from the window's base, as an unsigned value.
@@ -201,28 +223,17 @@ impl Ladder {
         (price as u64).wrapping_sub(self.base as u64)
     }
 
-    #[inline]
+    /// Where a price sits, or `None` if the window cannot hold it.
+    ///
+    /// Only the rebase replay calls this: it is the one caller whose prices may
+    /// fall outside, so it is the one that needs the bounds check the hot path
+    /// has already performed.
     fn locate_placed(&mut self, price: i64) -> Option<usize> {
         let offset = self.offset_of(price);
-        if offset >= self.span() {
-            // Only reachable from the rebase replay, where a level that the
-            // new window cannot hold is the caller's to account for.
+        if offset >= self.span {
             return None;
         }
-        let index = self.index_of(offset);
-        // The multiply is exact only for on-grid offsets, so this check is
-        // both the grid validation and the proof the index is right.
-        if index * (self.tick as usize) != offset as usize {
-            self.off_grid += 1;
-            return None;
-        }
-        Some(index)
-    }
-
-    /// Price the window spans, in fixed-point units.
-    #[inline]
-    fn span(&self) -> u64 {
-        self.qty.len() as u64 * self.tick as u64
+        self.index_at(offset)
     }
 
     /// Recentres the window on `price`, carrying live levels across.
