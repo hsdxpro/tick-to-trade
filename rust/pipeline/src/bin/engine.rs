@@ -18,10 +18,11 @@
 //! engine --feed 127.0.0.1:9701 --orders 127.0.0.1:9702
 //! ```
 
-use std::io::{ErrorKind, Write};
+use std::io::Write;
 use std::net::{TcpStream, UdpSocket};
 use t2t_feed::Parser;
 use t2t_feed::synth::TRADFI;
+use t2t_pipeline::transport::{BusyPoll, Receiver};
 use t2t_pipeline::{BAND, BboUpdate, FeedStage, OrderCommand, Strategy};
 
 fn argument(name: &str, default: &str) -> String {
@@ -38,8 +39,9 @@ fn main() -> std::io::Result<()> {
     let feed_address = argument("--feed", "127.0.0.1:9701");
     let orders_address = argument("--orders", "127.0.0.1:9702");
 
-    let socket = UdpSocket::bind(&feed_address)?;
-    socket.set_nonblocking(true)?;
+    // The engine busy-polls its feed: rxlat measures this against blocking,
+    // and busy-poll wins on a commodity NIC by skipping the wakeup.
+    let mut feed_rx = BusyPoll::new(UdpSocket::bind(&feed_address)?)?;
     let mut orders = TcpStream::connect(&orders_address)?;
     orders.set_nodelay(true)?;
     println!("engine: feed {feed_address}, orders {orders_address}");
@@ -53,13 +55,9 @@ fn main() -> std::io::Result<()> {
         let mut sink = FeedStage::new(TRADFI.len(), BAND);
         let mut datagram = [0_u8; 2048];
         loop {
-            let received = match socket.recv_from(&mut datagram) {
-                Ok((bytes, _)) => bytes,
-                Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                    std::hint::spin_loop();
-                    continue;
-                }
-                Err(e) => return Err(e),
+            let Some(received) = feed_rx.recv(&mut datagram)? else {
+                std::hint::spin_loop();
+                continue;
             };
             // A datagram carries whole messages; a tail would be a framing
             // bug on the sender's side and shows up as a parse error here.

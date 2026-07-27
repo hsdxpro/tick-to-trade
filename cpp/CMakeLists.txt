@@ -57,6 +57,15 @@ add_test(NAME t2t_test_book COMMAND t2t_test_book)
 add_executable(t2t_bench_book bench/bench_book.cpp)
 target_link_libraries(t2t_bench_book PRIVATE t2t)
 
+add_executable(t2t_bench_internal bench/bench_internal.cpp)
+target_link_libraries(t2t_bench_internal PRIVATE t2t Threads::Threads)
+
+add_executable(t2t_engine pipeline/engine.cpp)
+target_link_libraries(t2t_engine PRIVATE t2t Threads::Threads)
+if(WIN32)
+    target_link_libraries(t2t_engine PRIVATE ws2_32)
+endif()
+
 find_package(Threads REQUIRED)
 target_link_libraries(t2t_test_spsc PRIVATE Threads::Threads)
 target_link_libraries(t2t_bench_spsc PRIVATE Threads::Threads)

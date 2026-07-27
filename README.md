@@ -18,6 +18,11 @@ Tick-to-trade, measured two ways because they answer different questions:
 | **Internal, production layout** (3 threads, SPSC rings, spinning) | 200 ns | **~300 ns** | 600 ns |
 | **Wire-to-wire** (UDP in, TCP out, loopback, measured at the counterparty) | 9.7 µs | **12.5 µs** | 25.1 µs |
 
+Both languages hit the same internal figures (C++ ~100 ns compute, ~400 ns
+staged) and are clocked wire-to-wire by the **same Rust harness** — the C++
+engine measured 11.9 µs p50 through it, within noise of the Rust engine's 12.5.
+One harness, one methodology, two engines.
+
 The internal figures come from the identical stage code the deployed engine
 runs, handed pre-built datagrams in memory. The staged path carries one ring
 hop standing in for the socket read (hop p50: ~50 ns); subtract it to model
@@ -121,13 +126,38 @@ C++, and both checkers were verified to discriminate: weakening one ordering
 fails each of them. The band assertion in the ladder caught this repository's
 own harness walking out of range, which is what it is for.
 
+## Receive transports, priced
+
+The ~12 µs network-stack bill is why the receive discipline matters. `rxlat`
+measures each on a UDP ping-pong (one-way, round-trip halved), the same way,
+so they compare:
+
+| Transport | Windows p50 | Linux p50 | What it is |
+|---|---:|---:|---|
+| blocking `recv` | 8.2 µs | 18.8 µs | park the thread; the wakeup is the cost |
+| busy-poll `recv` | **5.9 µs** | **3.4 µs** | spin a core, skip the wakeup — what the engine does |
+| io_uring (polled CQ) | — | 4.6 µs | completion-based; Linux only |
+
+The finding worth stating: **io_uring does not beat busy-poll here**, because
+its advantage is amortizing syscalls across a batch and a one-packet probe has
+no batch. It pulls ahead when many receives are in flight — which a real feed
+handler has and a latency probe does not. Measuring it was the only way to know
+that rather than assume it.
+
+Two transports are documented seams behind the same `Receiver` trait, honestly
+labelled: **AF_XDP** (kernel bypass on a commodity NIC via the generic XDP hook
+— the real "fastest without special hardware", waiting on a host with a spare
+interface) and **DPDK** (full bypass, written against the poll-mode-driver API
+behind a `dpdk` feature that no build here enables, because a DPDK number from a
+machine with no DPDK-bound NIC would be invented — and this repository does not
+invent figures).
+
 ## Not here, on purpose
 
-Kernel-bypass transports (io_uring, AF_XDP, DPDK) are the next seam — the
-~12 µs network-stack bill above is their measured motivation. No real signal:
-the strategy is one deterministic rule, because the decision is a deployment's
-business and everything around it is what this repository measures. No
-multi-venue routing, no risk layer — those live in the exchange-side project.
+No real signal: the strategy is one deterministic rule, because the decision is
+a deployment's business and everything around it is what this repository
+measures. No multi-venue routing, no risk layer — those live in the
+exchange-side project.
 
 ## License
 
