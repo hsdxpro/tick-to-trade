@@ -60,8 +60,8 @@ parses one schema. That gap is what knowing the schema is worth.
 
 | Structure | Custom | Standard | Gain |
 |---|---:|---:|---:|
-| Ladder (windowed array + occupancy bitmap) | 2.7 ms | BTreeMap 30.4 ms | **11×** |
-| Order map (open addressing, backward-shift) | 36.5 ms | HashMap 44.2 ms | 1.2× |
+| Ladder, isolated (Rust) | 2.7 ms | BTreeMap 30.4 ms | **11×** |
+| Order map, isolated (Rust) | 36.5 ms | HashMap 44.2 ms | 1.2× |
 | Book blended, Rust | 53.7 ns/ev | 102.8 ns/ev | 1.9× |
 | Book blended, C++ | 48.5 ns/ev | std::map 214.5 ns/ev | 4.4× |
 | SPSC ring, 20M items | 1.6 ns/item | sync_channel 13.9, crossbeam 27.5 | **8.7×** |
