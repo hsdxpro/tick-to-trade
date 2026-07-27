@@ -127,7 +127,7 @@ int main() {
         Rng a{kGeneratorSeed};
         Rng b{kGeneratorSeed};
         Rng c{kGeneratorSeed};
-        REQUIRE(fnv1a(synth::itch(1'000, a).bytes) == 0x71b4'fb40'09e2'edd3ULL);
+        REQUIRE(fnv1a(synth::itch(1'000, a).bytes) == 0xa979'5807'4d83'd4f6ULL);
         REQUIRE(fnv1a(synth::fix(1'000, b).bytes) == 0xe78f'c2c9'75f9'd42cULL);
         REQUIRE(fnv1a(synth::json(1'000, c).bytes) == 0x98f0'cfe0'e468'699fULL);
     }

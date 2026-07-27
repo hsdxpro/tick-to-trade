@@ -176,7 +176,7 @@ fn streams_match_the_cross_language_fingerprints() {
     let fix = fnv1a(&synth::fix(1_000, &mut Rng(GENERATOR_SEED)).bytes);
     let json = fnv1a(&synth::json(1_000, &mut Rng(GENERATOR_SEED)).bytes);
     eprintln!("fingerprint itch {itch:x} fix {fix:x} json {json:x}");
-    assert_eq!(itch, 0x71b4_fb40_09e2_edd3, "itch stream diverged from C++");
+    assert_eq!(itch, 0xa979_5807_4d83_d4f6, "itch stream diverged from C++");
     assert_eq!(fix, 0xe78f_c2c9_75f9_d42c, "fix stream diverged from C++");
     assert_eq!(json, 0x98f0_cfe0_e468_699f, "json stream diverged from C++");
 }

@@ -259,6 +259,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "t2t-book"
+version = "0.1.0"
+dependencies = [
+ "t2t-feed",
+]
+
+[[package]]
 name = "t2t-feed"
 version = "0.1.0"
 dependencies = [

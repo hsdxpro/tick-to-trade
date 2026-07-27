@@ -1,0 +1,22 @@
+[package]
+name = "t2t-book"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+t2t-feed = { path = "../feed" }
+
+[[bench]]
+name = "maintain"
+harness = false
+
+[[bench]]
+name = "structures"
+harness = false
+
+[lints.rust]
+missing_debug_implementations = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }

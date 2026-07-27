@@ -58,10 +58,21 @@ inline void push_stock(std::vector<std::byte>& out, std::uint16_t symbol) {
 
 // ------------------------------------------------------------------ ITCH
 
+/// One step of a symbol's mid-price walk, and a price near it -- the same
+/// clustered shape as the Rust generator, call-for-call, because the
+/// workload's distribution is part of what the benchmarks compare.
+inline std::uint32_t walk_price(std::int64_t& mid, Rng& rng) {
+    mid += (static_cast<std::int64_t>(rng.below(3)) - 1) * 100;
+    mid = std::max<std::int64_t>(1'000'000, std::min<std::int64_t>(1'500'000, mid));
+    const auto offset = (static_cast<std::int64_t>(rng.below(65)) - 32) * 100;
+    return static_cast<std::uint32_t>(mid + offset);
+}
+
 inline Generated itch(std::size_t count, Rng& rng) {
     Generated out;
     std::vector<std::pair<std::uint64_t, std::uint16_t>> live;
     std::uint64_t next_order = 1;
+    std::int64_t mids[4] = {1'250'000, 1'250'000, 1'250'000, 1'250'000};
 
     auto frame = [&out](const std::vector<std::byte>& body) {
         push_be16(out.bytes, static_cast<std::uint16_t>(body.size()));
@@ -75,7 +86,7 @@ inline Generated itch(std::size_t count, Rng& rng) {
             const auto order = next_order++;
             const Side side = rng.below(2) == 0 ? Side::Bid : Side::Ask;
             const auto shares = static_cast<std::uint32_t>(1 + rng.below(5'000));
-            const auto price = static_cast<std::uint32_t>(1'000'000 + rng.below(500'000));
+            const auto price = walk_price(mids[symbol], rng);
             live.emplace_back(order, symbol);
             std::vector<std::byte> body;
             body.push_back(static_cast<std::byte>('A'));
@@ -131,7 +142,7 @@ inline Generated itch(std::size_t count, Rng& rng) {
                 const auto replacement = next_order++;
                 live[pick] = {replacement, order_symbol};
                 const auto shares = static_cast<std::uint32_t>(1 + rng.below(5'000));
-                const auto price = static_cast<std::uint32_t>(1'000'000 + rng.below(500'000));
+                const auto price = walk_price(mids[order_symbol], rng);
                 std::vector<std::byte> body;
                 body.push_back(static_cast<std::byte>('U'));
                 push_be16(body, order_symbol);
@@ -147,7 +158,7 @@ inline Generated itch(std::size_t count, Rng& rng) {
             } else {
                 const Side side = rng.below(2) == 0 ? Side::Bid : Side::Ask;
                 const auto shares = static_cast<std::uint32_t>(1 + rng.below(500));
-                const auto price = static_cast<std::uint32_t>(1'000'000 + rng.below(500'000));
+                const auto price = walk_price(mids[order_symbol], rng);
                 const auto match_no = rng.next();
                 std::vector<std::byte> body;
                 body.push_back(static_cast<std::byte>('P'));

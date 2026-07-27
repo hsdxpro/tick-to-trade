@@ -24,10 +24,27 @@ pub struct Generated {
 
 // ------------------------------------------------------------------ ITCH
 
+/// One step of a symbol's mid-price walk, and a price near it.
+///
+/// Real feeds cluster activity at the touch: the mid wanders one tick at a
+/// time and orders land within a few dozen ticks of it. A uniform price draw
+/// -- the first version of this generator -- put every insert in the middle
+/// of the ladder, a distribution no market produces, and it inverted which
+/// data structures win downstream. The workload's shape is part of the
+/// specification, so it is written here rather than assumed.
+fn walk_price(mid: &mut i64, rng: &mut Rng) -> u32 {
+    // One-cent steps in raw ITCH units (four implied decimals).
+    *mid += (rng.below(3) as i64 - 1) * 100;
+    *mid = (*mid).clamp(1_000_000, 1_500_000);
+    let offset = (rng.below(65) as i64 - 32) * 100;
+    (*mid + offset) as u32
+}
+
 pub fn itch(count: usize, rng: &mut Rng) -> Generated {
     let mut out = Generated::default();
     let mut live: Vec<(u64, u16)> = Vec::new(); // order → symbol, for realistic E/X/D/U
     let mut next_order = 1_u64;
+    let mut mids = [1_250_000_i64; 4];
 
     for _ in 0..count {
         let symbol = rng.below(TRADFI.len() as u64) as u16;
@@ -43,7 +60,7 @@ pub fn itch(count: usize, rng: &mut Rng) -> Generated {
                 Side::Ask
             };
             let shares = 1 + rng.below(5_000) as u32;
-            let price = 1_000_000 + rng.below(500_000) as u32; // 4 implied decimals
+            let price = walk_price(&mut mids[symbol as usize], rng);
             live.push((order, symbol));
             push_itch_add(&mut out, symbol, order, side, shares, price);
         } else {
@@ -68,7 +85,7 @@ pub fn itch(count: usize, rng: &mut Rng) -> Generated {
                     next_order += 1;
                     live[pick] = (replacement, symbol);
                     let shares = 1 + rng.below(5_000) as u32;
-                    let price = 1_000_000 + rng.below(500_000) as u32;
+                    let price = walk_price(&mut mids[symbol as usize], rng);
                     push_itch_replace(&mut out, symbol, order, replacement, shares, price);
                 }
                 _ => {
@@ -78,7 +95,7 @@ pub fn itch(count: usize, rng: &mut Rng) -> Generated {
                         Side::Ask
                     };
                     let shares = 1 + rng.below(500) as u32;
-                    let price = 1_000_000 + rng.below(500_000) as u32;
+                    let price = walk_price(&mut mids[symbol as usize], rng);
                     let match_no = rng.step();
                     push_itch_trade(&mut out, symbol, order, side, shares, price, match_no);
                 }
