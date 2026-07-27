@@ -12,6 +12,7 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#include <type_traits>
 
 namespace t2t::feed {
 
@@ -70,20 +71,37 @@ using Bytes = std::span<const std::byte>;
     return static_cast<std::uint8_t>(b[i]);
 }
 
+/// Reverses the bytes of an unsigned integer.
+///
+/// `std::byteswap` says exactly this, but it is C++23, and C++23 is a preview
+/// mode on MSVC rather than a supported standard. The baseline here is C++20 --
+/// the newest standard all three compilers implement properly -- so the library
+/// function is used when the compiler advertises it and spelled out when it
+/// does not. Both forms compile to the same `bswap`; the shift-and-OR version
+/// measured within 2% of the intrinsic, which is why this costs nothing.
+template <typename T>
+[[nodiscard]] constexpr T byteswap(T value) {
+#if defined(__cpp_lib_byteswap)
+    return std::byteswap(value);
+#else
+    static_assert(std::is_unsigned_v<T>, "byte order applies to unsigned integers");
+    T out{};
+    for (std::size_t i = 0; i < sizeof(T); ++i) {
+        out = static_cast<T>(out << 8) | static_cast<T>((value >> (i * 8)) & 0xFF);
+    }
+    return out;
+#endif
+}
+
 /// A big-endian field: one unaligned load and a byte swap.
 ///
-/// The form this replaced shifted and OR'd each byte into place: eight loads
-/// and seven shifts written out for a 64-bit field, on the assumption the
-/// compiler would fold them back. Measuring said it already did -- the change
-/// was worth about 2% -- so this stands on saying what it means rather than on
-/// the speed. `std::byteswap` is C++23 and names the operation; the `memcpy` is
-/// the only strictly-conforming way to reinterpret the bytes, and every
-/// compiler folds it into the one load it describes.
+/// The `memcpy` is the only strictly-conforming way to reinterpret the bytes,
+/// and every compiler folds it into the single load it describes.
 template <typename T>
 [[nodiscard]] inline T be(Bytes b, std::size_t i) {
     T value{};
     std::memcpy(&value, b.data() + i, sizeof(T));
-    return std::byteswap(value);
+    return byteswap(value);
 }
 
 [[nodiscard]] inline std::uint16_t be16(Bytes b, std::size_t i) {

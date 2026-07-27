@@ -161,7 +161,8 @@ cargo run --release -p t2t-pipeline --bin harness
 cargo run --release -p t2t-pipeline --bin engine
 ```
 
-C++ (MSVC or GCC ≥ 13; C++23):
+C++20 — the newest standard MSVC, GCC and Clang all implement properly, rather
+than as a preview mode. Verified on MSVC 2022 and GCC 15:
 
 ```bash
 cd cpp && cmake -S . -B build && cmake --build build --config Release && ctest --test-dir build -C Release
@@ -171,7 +172,7 @@ ThreadSanitizer checks the ring's memory orderings. It needs GCC or Clang —
 `-DT2T_TSAN=ON` is a no-op under MSVC, which has no `-fsanitize=thread`:
 
 ```bash
-cd cpp && g++ -std=c++23 -O1 -g -fsanitize=thread -pthread tests/test_spsc.cpp -o t_spsc_tsan && ./t_spsc_tsan
+cd cpp && g++ -std=c++20 -O1 -g -fsanitize=thread -pthread tests/test_spsc.cpp -o t_spsc_tsan && ./t_spsc_tsan
 ```
 
 ## Verification
