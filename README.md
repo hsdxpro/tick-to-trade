@@ -108,9 +108,11 @@ Order entry is a session, not a socket.
 
 | Transport | Windows p50 | Linux p50 |
 |---|---:|---:|
-| blocking `recv` | 8.2 µs | 18.8 µs |
-| busy-poll `recv` | **5.9 µs** | **3.4 µs** |
-| io_uring (polled CQ) | — | 4.6 µs |
+| blocking `recv` | 8.2 µs | 17.4 µs |
+| busy-poll `recv` | **5.9 µs** | **2.8 µs** |
+| io_uring (polled CQ) | — | 4.0 µs |
+
+Linux column measured under WSL2, one-way, ping-pong halved over 50,000 rounds.
 
 io_uring does **not** beat busy-poll here — it amortizes syscalls across a
 batch, and a one-packet probe has none. AF_XDP and DPDK sit behind the same
