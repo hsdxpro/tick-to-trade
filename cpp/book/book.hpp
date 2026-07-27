@@ -229,15 +229,18 @@ private:
             unplaced ? target : base_ + ((target - base_) / tick_) * tick_;
 
         if (len_ > 0) {
-            std::vector<std::pair<std::int64_t, std::int64_t>> live;
-            live.reserve(len_);
-            for_each_from_touch([&](auto p, auto q) { live.emplace_back(p, q); });
+            // The buffer is a member and is reused. It used to be built here,
+            // on the one path that runs *because* the market just moved --
+            // which is the worst moment to call the allocator, and exactly the
+            // shape of a tail-latency spike.
+            live_.clear();
+            for_each_from_touch([&](auto p, auto q) { live_.emplace_back(p, q); });
             std::fill(qty_.begin(), qty_.end(), 0);
             std::fill(occupied_.begin(), occupied_.end(), 0);
             len_ = 0;
             best_ = kEmpty;
             base_ = shifted;
-            for (const auto& [level_price, level_qty] : live) {
+            for (const auto& [level_price, level_qty] : live_) {
                 const auto index = locate_placed(level_price);
                 if (index == kEmpty) {
                     // A whole window from where the market now trades: that is
@@ -325,6 +328,15 @@ private:
     /// Price the window spans. `ticks * tick`, and neither changes, so it is
     /// stored rather than recomputed on a path that runs per message.
     std::uint64_t span_;
+    /// Scratch for `rebase`, owned so shifting the window allocates nothing.
+    /// It settles at the deepest the book has been.
+    ///
+    /// A rebase is O(live levels) because it replaces each one. It could be
+    /// O(width) at memmove speed: the base always moves by a whole number of
+    /// ticks, so every level moves by the same index delta, which makes the
+    /// quantity array a `memmove` and the bitmap a word-and-bit shift. That is
+    /// the better structure and it is not here yet.
+    std::vector<std::pair<std::int64_t, std::int64_t>> live_;
     std::size_t best_{kEmpty};
     bool descending_;
     std::size_t len_{0};

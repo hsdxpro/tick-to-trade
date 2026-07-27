@@ -103,6 +103,15 @@ pub struct Ladder {
     /// Bids' best is the highest occupied index; asks' the lowest.
     descending: bool,
     len: usize,
+    /// Scratch for [`Ladder::rebase`], owned so that shifting the window
+    /// allocates nothing. It settles at the deepest the book has been.
+    ///
+    /// A rebase is O(live levels) because it replaces each one. It could be
+    /// O(width) at memmove speed instead: the base always moves by a whole
+    /// number of ticks, so every level moves by the same index delta, which
+    /// makes the quantity array a `copy_within` and the bitmap a word-and-bit
+    /// shift. That is the better structure and it is not here yet.
+    live: Vec<(i64, i64)>,
     /// Windows recentred, and prices refused for not lying on the grid.
     /// Counted rather than logged: an operator watching either climb learns
     /// something, and the hot path pays an increment.
@@ -158,6 +167,7 @@ impl Ladder {
             best: Self::EMPTY,
             descending,
             len: 0,
+            live: Vec::new(),
             rebases: 0,
             off_grid: 0,
             evicted: 0,
@@ -276,14 +286,21 @@ impl Ladder {
             // base. Levels the new window cannot hold are dropped, which is
             // correct: the market has moved a window's width away from them,
             // and a book that far from the touch is stale, not liquid.
-            let mut live: Vec<(i64, i64)> = Vec::with_capacity(self.len);
+            //
+            // The buffer is owned and reused. It used to be allocated here, on
+            // the one path that runs *because* the market just moved -- which
+            // is the worst moment to call the allocator, and exactly the shape
+            // of a tail-latency spike. Taken out and put back so the closure
+            // can borrow the ladder while filling it.
+            let mut live = std::mem::take(&mut self.live);
+            live.clear();
             self.for_each_from_touch(|price, qty| live.push((price, qty)));
             self.qty.iter_mut().for_each(|slot| *slot = 0);
             self.occupied.iter_mut().for_each(|word| *word = 0);
             self.len = 0;
             self.best = Self::EMPTY;
             self.base = new_base;
-            for (price, qty) in live {
+            for &(price, qty) in &live {
                 if let Some(index) = self.locate_placed(price) {
                     self.qty[index] = qty;
                     self.mark(index);
@@ -295,6 +312,7 @@ impl Ladder {
                     self.evicted += 1;
                 }
             }
+            self.live = live;
         } else {
             self.base = new_base;
         }
