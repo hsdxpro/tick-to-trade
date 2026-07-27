@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["spsc", "feed", "book"]
+members = ["spsc", "feed", "book", "pipeline"]
 
 [workspace.package]
 edition = "2024"

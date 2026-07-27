@@ -1,0 +1,16 @@
+[package]
+name = "t2t-pipeline"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+t2t-spsc = { path = "../spsc" }
+t2t-feed = { path = "../feed" }
+t2t-book = { path = "../book" }
+
+[lints.rust]
+missing_debug_implementations = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }

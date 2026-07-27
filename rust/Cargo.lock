@@ -274,6 +274,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "t2t-pipeline"
+version = "0.1.0"
+dependencies = [
+ "t2t-book",
+ "t2t-feed",
+ "t2t-spsc",
+]
+
+[[package]]
 name = "t2t-spsc"
 version = "0.1.0"
 dependencies = [
