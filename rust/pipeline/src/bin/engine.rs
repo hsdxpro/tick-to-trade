@@ -20,17 +20,9 @@
 
 use std::io::{ErrorKind, Write};
 use std::net::{TcpStream, UdpSocket};
-use t2t_book::{Band, Books};
+use t2t_feed::Parser;
 use t2t_feed::synth::TRADFI;
-use t2t_feed::{Event, Parser, Sink};
-use t2t_pipeline::{BboUpdate, OrderCommand};
-
-/// The band the harness's ticks stay inside; see the generator's mid-walk.
-const BAND: Band = Band {
-    floor: (1_000_000 - 3_200) * 10_000,
-    tick: 100 * 10_000,
-    ticks: 5_070,
-};
+use t2t_pipeline::{BAND, BboUpdate, FeedStage, OrderCommand, Strategy};
 
 fn argument(name: &str, default: &str) -> String {
     let mut arguments = std::env::args().skip(1);
@@ -40,32 +32,6 @@ fn argument(name: &str, default: &str) -> String {
         }
     }
     default.to_string()
-}
-
-/// Applies parsed events and notices when symbol 0's touch moves.
-struct BookSink {
-    books: Books,
-    touch: (i64, i64),
-    moved: Option<BboUpdate>,
-}
-
-impl Sink for BookSink {
-    fn accept(&mut self, event: &Event) {
-        self.books.apply(event);
-        let book = self.books.symbol(0);
-        let bid = book.bids.best().unwrap_or((0, 0));
-        let ask = book.asks.best().unwrap_or((0, 0));
-        if (bid.0, ask.0) != self.touch {
-            self.touch = (bid.0, ask.0);
-            self.moved = Some(BboUpdate {
-                symbol: 0,
-                bid_price: bid.0,
-                bid_qty: bid.1,
-                ask_price: ask.0,
-                ask_qty: ask.1,
-            });
-        }
-    }
 }
 
 fn main() -> std::io::Result<()> {
@@ -84,11 +50,7 @@ fn main() -> std::io::Result<()> {
     // Feed: the socket's only reader, and the owner of the books.
     let feed = std::thread::spawn(move || -> std::io::Result<()> {
         let parser = t2t_feed::itch::Itch { symbols: TRADFI };
-        let mut sink = BookSink {
-            books: Books::new(TRADFI.len(), BAND),
-            touch: (0, 0),
-            moved: None,
-        };
+        let mut sink = FeedStage::new(TRADFI.len(), BAND);
         let mut datagram = [0_u8; 2048];
         loop {
             let received = match socket.recv_from(&mut datagram) {
@@ -105,7 +67,7 @@ fn main() -> std::io::Result<()> {
                 eprintln!("engine: undecodable datagram dropped");
                 continue;
             }
-            if let Some(update) = sink.moved.take() {
+            if let Some(update) = sink.take_moved() {
                 // The ring is sized for bursts; a full ring means the
                 // strategy died, and spinning is the only honest option left.
                 let mut item = update;
@@ -117,34 +79,21 @@ fn main() -> std::io::Result<()> {
         }
     });
 
-    // Strategy: one decision, no I/O. An order per best-bid improvement.
+    // Strategy: one decision, no I/O.
     let strategy = std::thread::spawn(move || {
-        let mut last_bid = 0_i64;
-        let mut next_id = 1_u64;
+        let mut strategy = Strategy::default();
         loop {
             let Some(update) = from_feed.try_pop() else {
                 std::hint::spin_loop();
                 continue;
             };
-            // Any bid price change with liquidity behind it. Change, not
-            // improvement: the harness cycles its probe price inside the
-            // band, and what matters is one deterministic order per probe.
-            if update.bid_price != last_bid && update.bid_qty > 0 {
-                let order = OrderCommand {
-                    client_order_id: next_id,
-                    symbol: update.symbol,
-                    side: t2t_feed::Side::Ask,
-                    price: update.bid_price,
-                    qty: update.bid_qty.min(100_000_000),
-                };
-                next_id += 1;
+            if let Some(order) = strategy.decide(&update) {
                 let mut item = order;
                 while let Err(back) = to_gateway.try_push(item) {
                     item = back;
                     std::hint::spin_loop();
                 }
             }
-            last_bid = update.bid_price;
         }
     });
 

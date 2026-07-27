@@ -9,6 +9,10 @@ t2t-spsc = { path = "../spsc" }
 t2t-feed = { path = "../feed" }
 t2t-book = { path = "../book" }
 
+[[bench]]
+name = "internal"
+harness = false
+
 [lints.rust]
 missing_debug_implementations = "deny"
 

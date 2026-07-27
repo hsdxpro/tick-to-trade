@@ -16,6 +16,10 @@ crossbeam-queue = "0.3"
 name = "throughput"
 harness = false
 
+[[bench]]
+name = "latency"
+harness = false
+
 [lints.rust]
 missing_debug_implementations = "deny"
 # loom is driven by RUSTFLAGS=--cfg loom, invisible to check-cfg otherwise.

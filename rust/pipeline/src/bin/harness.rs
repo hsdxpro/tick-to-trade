@@ -20,7 +20,7 @@
 use std::io::{ErrorKind, Read};
 use std::net::{TcpListener, UdpSocket};
 use std::time::Instant;
-use t2t_pipeline::ORDER_WIRE_LEN;
+use t2t_pipeline::{ORDER_WIRE_LEN, probe};
 
 fn argument(name: &str, default: &str) -> String {
     let mut arguments = std::env::args().skip(1);
@@ -30,40 +30,6 @@ fn argument(name: &str, default: &str) -> String {
         }
     }
     default.to_string()
-}
-
-fn frame(out: &mut Vec<u8>, body: &[u8]) {
-    out.extend_from_slice(&(body.len() as u16).to_be_bytes());
-    out.extend_from_slice(body);
-}
-
-/// One probe datagram: delete the previous probe's order, add the next one.
-///
-/// The book therefore holds exactly one live order, the bid price changes on
-/// every probe, and the price cycles inside the band forever -- the first
-/// version climbed monotonically and walked straight out of the band, which
-/// the engine rightly treats as fatal.
-fn tick(previous: Option<u64>, order: u64, price: u32) -> Vec<u8> {
-    let mut datagram = Vec::with_capacity(2 + 19 + 2 + 36);
-    if let Some(previous) = previous {
-        let mut body = Vec::with_capacity(19);
-        body.push(b'D');
-        body.extend_from_slice(&0_u16.to_be_bytes());
-        body.extend_from_slice(&[0; 8]);
-        body.extend_from_slice(&previous.to_be_bytes());
-        frame(&mut datagram, &body);
-    }
-    let mut body = Vec::with_capacity(36);
-    body.push(b'A');
-    body.extend_from_slice(&0_u16.to_be_bytes()); // stock locate 0 = AAPL
-    body.extend_from_slice(&[0; 8]);
-    body.extend_from_slice(&order.to_be_bytes());
-    body.push(b'B');
-    body.extend_from_slice(&100_u32.to_be_bytes());
-    body.extend_from_slice(b"AAPL    ");
-    body.extend_from_slice(&price.to_be_bytes());
-    frame(&mut datagram, &body);
-    datagram
 }
 
 fn main() -> std::io::Result<()> {
@@ -85,11 +51,10 @@ fn main() -> std::io::Result<()> {
     let warmup = probes / 10;
     let mut previous: Option<u64> = None;
 
-    for probe in 0..probes + warmup {
-        // Cycles over 2,000 one-cent ticks, comfortably inside the band.
-        let price = 1_000_000 + ((probe as u32) % 2_000) * 100;
-        let order = probe as u64 + 1;
-        let datagram = tick(previous, order, price);
+    for index in 0..probes + warmup {
+        let price = probe::price_of(index);
+        let order = index as u64 + 1;
+        let datagram = probe::datagram(previous, order, price);
         previous = Some(order);
 
         let started = Instant::now();
@@ -107,7 +72,7 @@ fn main() -> std::io::Result<()> {
             }
         }
         let elapsed = started.elapsed();
-        if probe >= warmup {
+        if index >= warmup {
             samples.push(elapsed.as_nanos() as u64);
         }
     }
