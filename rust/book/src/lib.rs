@@ -68,10 +68,12 @@ pub struct Band {
 /// range in advance and refused -- loudly -- anything outside it. Real books
 /// hold liquidity in a narrow neighbourhood of the touch while the touch
 /// itself wanders all day, so the window recentres when a price falls outside
-/// it, carrying the live levels across. Rebasing costs one pass over the live
-/// levels, of which a book has hundreds; it happens when the market has moved
-/// half a window, which is rarely, and the alternative was an array sized for
-/// a year of price history.
+/// it, carrying the live levels across. The base moves by a whole number of
+/// ticks, so every level moves by the same index delta, and the carry is one
+/// bulk move: a `copy_within` of the quantities and a word-and-bit shift of
+/// the bitmap, with the stranded levels counted off the end. It happens when
+/// the market has moved half a window, which is rarely, and the alternative
+/// was an array sized for a year of price history.
 ///
 /// **The index is a multiply, not a divide.** Turning a price into an index
 /// is `(price - base) / tick`, and a 64-bit integer divide is tens of cycles
@@ -103,15 +105,6 @@ pub struct Ladder {
     /// Bids' best is the highest occupied index; asks' the lowest.
     descending: bool,
     len: usize,
-    /// Scratch for [`Ladder::rebase`], owned so that shifting the window
-    /// allocates nothing. It settles at the deepest the book has been.
-    ///
-    /// A rebase is O(live levels) because it replaces each one. It could be
-    /// O(width) at memmove speed instead: the base always moves by a whole
-    /// number of ticks, so every level moves by the same index delta, which
-    /// makes the quantity array a `copy_within` and the bitmap a word-and-bit
-    /// shift. That is the better structure and it is not here yet.
-    live: Vec<(i64, i64)>,
     /// Windows recentred, and prices refused for not lying on the grid.
     /// Counted rather than logged: an operator watching either climb learns
     /// something, and the hot path pays an increment.
@@ -167,7 +160,6 @@ impl Ladder {
             best: Self::EMPTY,
             descending,
             len: 0,
-            live: Vec::new(),
             rebases: 0,
             off_grid: 0,
             evicted: 0,
@@ -233,19 +225,6 @@ impl Ladder {
         (price as u64).wrapping_sub(self.base as u64)
     }
 
-    /// Where a price sits, or `None` if the window cannot hold it.
-    ///
-    /// Only the rebase replay calls this: it is the one caller whose prices may
-    /// fall outside, so it is the one that needs the bounds check the hot path
-    /// has already performed.
-    fn locate_placed(&mut self, price: i64) -> Option<usize> {
-        let offset = self.offset_of(price);
-        if offset >= self.span {
-            return None;
-        }
-        self.index_at(offset)
-    }
-
     /// Recentres the window on `price`, carrying live levels across.
     ///
     /// Out of line and marked cold: it runs when the market has walked half a
@@ -280,43 +259,125 @@ impl Ladder {
         } else {
             self.base + ((target - self.base) / self.tick) * self.tick
         };
-
         if self.len > 0 {
-            // Collect the live levels, then replace them relative to the new
-            // base. Levels the new window cannot hold are dropped, which is
-            // correct: the market has moved a window's width away from them,
-            // and a book that far from the touch is stale, not liquid.
-            //
-            // The buffer is owned and reused. It used to be allocated here, on
-            // the one path that runs *because* the market just moved -- which
-            // is the worst moment to call the allocator, and exactly the shape
-            // of a tail-latency spike. Taken out and put back so the closure
-            // can borrow the ladder while filling it.
-            let mut live = std::mem::take(&mut self.live);
-            live.clear();
-            self.for_each_from_touch(|price, qty| live.push((price, qty)));
+            // The base moves by a whole number of ticks, so every level moves
+            // by the same index delta. That makes the carry one bulk move
+            // rather than a per-level replay: this used to walk each live
+            // level and re-place it, O(live) with a scratch buffer, and is now
+            // O(width) at copy speed with no scratch at all.
+            self.shift_levels(((new_base - self.base) / self.tick) as isize);
+        }
+        self.base = new_base;
+        self.rebases += 1;
+    }
+
+    /// Moves every held level down by `delta` indices (up when negative),
+    /// dropping the levels the move pushes off either end.
+    ///
+    /// Dropping them is correct, not lossy bookkeeping: a level a whole window
+    /// away from where the market now trades is stale depth, and holding it
+    /// would mean sizing for an instrument's lifetime range.
+    fn shift_levels(&mut self, delta: isize) {
+        debug_assert!(delta != 0, "a rebase that moves nothing is a bug upstream");
+        let width = self.qty.len();
+        if delta.unsigned_abs() >= width {
+            // The window jumped clear of everything it held.
+            self.evicted += self.len as u64;
             self.qty.iter_mut().for_each(|slot| *slot = 0);
             self.occupied.iter_mut().for_each(|word| *word = 0);
             self.len = 0;
             self.best = Self::EMPTY;
-            self.base = new_base;
-            for &(price, qty) in &live {
-                if let Some(index) = self.locate_placed(price) {
-                    self.qty[index] = qty;
-                    self.mark(index);
-                } else {
-                    // Further from the touch than the window is wide. Dropped
-                    // rather than grown into: a level a whole window away from
-                    // where the market is trading is stale depth, and holding
-                    // it would mean sizing for an instrument's lifetime range.
-                    self.evicted += 1;
+            return;
+        }
+        let d = delta.unsigned_abs();
+        let dropped = if delta > 0 {
+            // Window moved up: indices fall by `d`, the lowest `d` fall out.
+            let dropped = self.take_bits(0, d);
+            self.qty.copy_within(d.., 0);
+            self.qty[width - d..].iter_mut().for_each(|slot| *slot = 0);
+            self.shift_bits_down(d);
+            dropped
+        } else {
+            // Window moved down: indices rise by `d`, the highest `d` fall out.
+            // Their bits are cleared before the shift so nothing real is ever
+            // pushed into the slack above `width` in the top word.
+            let dropped = self.take_bits(width - d, width);
+            self.qty.copy_within(..width - d, d);
+            self.qty[..d].iter_mut().for_each(|slot| *slot = 0);
+            self.shift_bits_up(d);
+            dropped
+        };
+        self.evicted += dropped;
+        self.len -= dropped as usize;
+        self.best = self.find_best();
+    }
+
+    /// Zeroes bits `[from, to)` and returns how many were set.
+    fn take_bits(&mut self, from: usize, to: usize) -> u64 {
+        let mut taken = 0;
+        let mut at = from;
+        while at < to {
+            let word = at / 64;
+            let hi = ((word + 1) * 64).min(to);
+            let low_mask = !0_u64 << (at % 64);
+            let mask = match hi - word * 64 {
+                64 => low_mask,
+                bits => ((1_u64 << bits) - 1) & low_mask,
+            };
+            taken += u64::from((self.occupied[word] & mask).count_ones());
+            self.occupied[word] &= !mask;
+            at = hi;
+        }
+        taken
+    }
+
+    /// Moves every set bit `d` positions toward index zero.
+    fn shift_bits_down(&mut self, d: usize) {
+        let words = self.occupied.len();
+        let (jump, bits) = (d / 64, (d % 64) as u32);
+        for word in 0..words {
+            let low = self.occupied.get(word + jump).copied().unwrap_or(0);
+            let high = self.occupied.get(word + jump + 1).copied().unwrap_or(0);
+            self.occupied[word] = if bits == 0 {
+                low
+            } else {
+                (low >> bits) | (high << (64 - bits))
+            };
+        }
+    }
+
+    /// Moves every set bit `d` positions away from index zero. Bits that
+    /// would land at or beyond `width` must already be cleared.
+    fn shift_bits_up(&mut self, d: usize) {
+        let words = self.occupied.len();
+        let (jump, bits) = (d / 64, (d % 64) as u32);
+        for word in (0..words).rev() {
+            let high = if word >= jump { self.occupied[word - jump] } else { 0 };
+            let low = if word > jump { self.occupied[word - jump - 1] } else { 0 };
+            self.occupied[word] = if bits == 0 {
+                high
+            } else {
+                (high << bits) | (low >> (64 - bits))
+            };
+        }
+    }
+
+    /// Re-finds the touch by scanning the bitmap from the best end.
+    fn find_best(&self) -> usize {
+        if self.descending {
+            for (word, &held) in self.occupied.iter().enumerate() {
+                if held != 0 {
+                    return word * 64 + held.trailing_zeros() as usize;
                 }
             }
-            self.live = live;
         } else {
-            self.base = new_base;
+            for (word, &held) in self.occupied.iter().enumerate().rev() {
+                if held != 0 {
+                    return word * 64 + 63 - held.leading_zeros() as usize;
+                }
+            }
         }
-        self.rebases += 1;
+        Self::EMPTY
     }
 
     #[inline]

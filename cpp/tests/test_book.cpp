@@ -243,6 +243,83 @@ void a_deep_book_keeps_its_depth_as_the_market_moves() {
     REQUIRE(ladder.rebases() >= 2);
 }
 
+/// Shifting the window drops exactly the levels it strands and keeps the
+/// rest untouched -- both directions, with survivors and with none.
+///
+/// The other tests all run with nothing evicted, which leaves the eviction
+/// accounting itself unpinned: an off-by-one in the dropped range passes
+/// every one of them. This test is the one that fails.
+void a_window_shift_evicts_exactly_the_levels_it_strands() {
+    Ladder ladder = Ladder::bids(Band{1, 4'096});
+    std::map<std::int64_t, std::int64_t> reference;
+    const std::int64_t touch = 1'000'000;
+    for (std::int64_t level = 0; level < 2'500; ++level) {
+        ladder.set(touch - level, 10 + level);
+        reference[touch - level] = 10 + level;
+    }
+    REQUIRE(ladder.evicted() == 0);
+
+    // Up: the market gaps half a window higher, stranding the lowest levels.
+    const auto up = touch + 2'048;
+    const auto before = ladder.depth();
+    ladder.set(up, 7);
+    reference[up] = 7;
+    const auto dropped_up = static_cast<std::size_t>(ladder.evicted());
+    REQUIRE(dropped_up > 0);
+    REQUIRE(ladder.depth() + dropped_up == before + 1);
+    // Survivors are exactly the highest reference levels, and the depth
+    // counter agrees with a walk of the bitmap itself -- the walk is the
+    // ground truth a drifting counter cannot hide from.
+    std::vector<std::pair<std::int64_t, std::int64_t>> held;
+    ladder.for_each_from_touch([&](auto p, auto q) { held.emplace_back(p, q); });
+    REQUIRE(ladder.depth() == held.size());
+    std::vector<std::pair<std::int64_t, std::int64_t>> expected;
+    for (auto it = reference.rbegin(); it != reference.rend() && expected.size() < held.size(); ++it) {
+        expected.emplace_back(it->first, it->second);
+    }
+    REQUIRE(held == expected);
+
+    // A jump wider than the window drops everything it held.
+    const auto far = up + 100'000;
+    const auto held_now = static_cast<std::uint64_t>(ladder.depth());
+    const auto evicted_before_far = ladder.evicted();
+    ladder.set(far, 3);
+    REQUIRE(ladder.evicted() == evicted_before_far + held_now);
+    REQUIRE(ladder.depth() == 1);
+    REQUIRE(ladder.best() == std::make_pair(std::int64_t{far}, std::int64_t{3}));
+
+    // Down: rebuild below the survivor, then gap down far enough to strand
+    // the top of the book but not all of it.
+    reference.clear();
+    reference[far] = 3;
+    for (std::int64_t level = 1; level < 2'500; ++level) {
+        ladder.set(far - level, 20 + level);
+        reference[far - level] = 20 + level;
+    }
+    const auto evicted_before = static_cast<std::size_t>(ladder.evicted());
+    const auto before_down = ladder.depth();
+    const auto down = far - 4'600;
+    ladder.set(down, 5);
+    reference[down] = 5;
+    const auto dropped_down = static_cast<std::size_t>(ladder.evicted()) - evicted_before;
+    REQUIRE(dropped_down > 0);
+    REQUIRE(ladder.depth() + dropped_down == before_down + 1);
+    // The strands are the highest prices, so the ladder holds everything
+    // below them: the reference minus its top `dropped_down` levels.
+    held.clear();
+    ladder.for_each_from_touch([&](auto p, auto q) { held.emplace_back(p, q); });
+    REQUIRE(ladder.depth() == held.size());
+    expected.clear();
+    auto it = reference.rbegin();
+    for (std::size_t skip = 0; skip < dropped_down && it != reference.rend(); ++skip) {
+        ++it;
+    }
+    for (; it != reference.rend(); ++it) {
+        expected.emplace_back(it->first, it->second);
+    }
+    REQUIRE(held == expected);
+}
+
 /// A price off the tick grid is refused and counted, not folded into the
 /// neighbouring level -- the failure mode nobody notices until the book is
 /// wrong and there is nothing to point at.
@@ -262,6 +339,7 @@ int main() {
     order_map_survives_churn_against_unordered_map();
     one_ladder_serves_any_asset_and_any_tick();
     a_deep_book_keeps_its_depth_as_the_market_moves();
+    a_window_shift_evicts_exactly_the_levels_it_strands();
     an_off_grid_price_is_refused_rather_than_rounded();
     if (failures == 0) {
         std::printf("book: all tests passed\n");

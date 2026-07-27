@@ -195,20 +195,6 @@ private:
         return index;
     }
 
-    /// `kEmpty` when the price is not on the grid: a venue publishing off-tick
-    /// prices is one whose tick size was configured wrongly, and rounding into
-    /// a neighbouring level would corrupt the book in the way nobody notices.
-    /// Where a price sits, or `kEmpty` if the window cannot hold it. Only the
-    /// rebase replay calls this: it is the one caller whose prices may fall
-    /// outside, so the one that needs a bounds check the hot path already did.
-    [[nodiscard]] std::size_t locate_placed(std::int64_t price) {
-        const auto offset = offset_of(price);
-        if (offset >= span_) {
-            return kEmpty;
-        }
-        return index_at(offset);
-    }
-
     /// Shifts the window onto `price`, carrying live levels across.
     ///
     /// Out of line: it runs when the market has walked past an edge, and the
@@ -227,34 +213,116 @@ private:
         // Snap to the existing grid so on-grid prices stay on it.
         const auto shifted =
             unplaced ? target : base_ + ((target - base_) / tick_) * tick_;
-
         if (len_ > 0) {
-            // The buffer is a member and is reused. It used to be built here,
-            // on the one path that runs *because* the market just moved --
-            // which is the worst moment to call the allocator, and exactly the
-            // shape of a tail-latency spike.
-            live_.clear();
-            for_each_from_touch([&](auto p, auto q) { live_.emplace_back(p, q); });
+            // The base moves by a whole number of ticks, so every level moves
+            // by the same index delta. That makes the carry one bulk move
+            // rather than a per-level replay: this used to walk each live
+            // level and re-place it, O(live) with a scratch buffer, and is now
+            // O(width) at copy speed with no scratch at all.
+            shift_levels(static_cast<std::ptrdiff_t>((shifted - base_) / tick_));
+        }
+        base_ = shifted;
+        ++rebases_;
+    }
+
+    /// Moves every held level down by `delta` indices (up when negative),
+    /// dropping the levels the move pushes off either end.
+    ///
+    /// Dropping them is correct, not lossy bookkeeping: a level a whole window
+    /// away from where the market now trades is stale depth, and holding it
+    /// would mean sizing for an instrument's lifetime range.
+    void shift_levels(std::ptrdiff_t delta) {
+        assert(delta != 0 && "a rebase that moves nothing is a bug upstream");
+        const auto width = qty_.size();
+        const auto d = static_cast<std::size_t>(delta < 0 ? -delta : delta);
+        if (d >= width) {
+            // The window jumped clear of everything it held.
+            evicted_ += len_;
             std::fill(qty_.begin(), qty_.end(), 0);
             std::fill(occupied_.begin(), occupied_.end(), 0);
             len_ = 0;
             best_ = kEmpty;
-            base_ = shifted;
-            for (const auto& [level_price, level_qty] : live_) {
-                const auto index = locate_placed(level_price);
-                if (index == kEmpty) {
-                    // A whole window from where the market now trades: that is
-                    // stale depth, dropped rather than grown into.
-                    ++evicted_;
-                    continue;
+            return;
+        }
+        std::uint64_t dropped = 0;
+        if (delta > 0) {
+            // Window moved up: indices fall by `d`, the lowest `d` fall out.
+            dropped = take_bits(0, d);
+            std::copy(qty_.begin() + static_cast<std::ptrdiff_t>(d), qty_.end(), qty_.begin());
+            std::fill(qty_.end() - static_cast<std::ptrdiff_t>(d), qty_.end(), 0);
+            shift_bits_down(d);
+        } else {
+            // Window moved down: indices rise by `d`, the highest `d` fall out.
+            // Their bits are cleared before the shift so nothing real is ever
+            // pushed into the slack above `width` in the top word.
+            dropped = take_bits(width - d, width);
+            std::copy_backward(qty_.begin(), qty_.end() - static_cast<std::ptrdiff_t>(d), qty_.end());
+            std::fill(qty_.begin(), qty_.begin() + static_cast<std::ptrdiff_t>(d), 0);
+            shift_bits_up(d);
+        }
+        evicted_ += dropped;
+        len_ -= static_cast<std::size_t>(dropped);
+        best_ = find_best();
+    }
+
+    /// Zeroes bits `[from, to)` and returns how many were set.
+    std::uint64_t take_bits(std::size_t from, std::size_t to) {
+        std::uint64_t taken = 0;
+        auto at = from;
+        while (at < to) {
+            const auto word = at / 64;
+            const auto hi = std::min((word + 1) * 64, to);
+            const auto low_mask = ~0ULL << (at % 64);
+            const auto bits = hi - word * 64;
+            const auto mask = bits == 64 ? low_mask : ((1ULL << bits) - 1) & low_mask;
+            taken += static_cast<std::uint64_t>(std::popcount(occupied_[word] & mask));
+            occupied_[word] &= ~mask;
+            at = hi;
+        }
+        return taken;
+    }
+
+    /// Moves every set bit `d` positions toward index zero.
+    void shift_bits_down(std::size_t d) {
+        const auto words = occupied_.size();
+        const auto jump = d / 64;
+        const auto bits = static_cast<unsigned>(d % 64);
+        for (std::size_t word = 0; word < words; ++word) {
+            const auto low = word + jump < words ? occupied_[word + jump] : 0;
+            const auto high = word + jump + 1 < words ? occupied_[word + jump + 1] : 0;
+            occupied_[word] = bits == 0 ? low : (low >> bits) | (high << (64 - bits));
+        }
+    }
+
+    /// Moves every set bit `d` positions away from index zero. Bits that
+    /// would land at or beyond `width` must already be cleared.
+    void shift_bits_up(std::size_t d) {
+        const auto words = occupied_.size();
+        const auto jump = d / 64;
+        const auto bits = static_cast<unsigned>(d % 64);
+        for (std::size_t word = words; word-- > 0;) {
+            const auto high = word >= jump ? occupied_[word - jump] : 0;
+            const auto low = word > jump ? occupied_[word - jump - 1] : 0;
+            occupied_[word] = bits == 0 ? high : (high << bits) | (low >> (64 - bits));
+        }
+    }
+
+    /// Re-finds the touch by scanning the bitmap from the best end.
+    [[nodiscard]] std::size_t find_best() const {
+        if (descending_) {
+            for (std::size_t word = 0; word < occupied_.size(); ++word) {
+                if (occupied_[word] != 0) {
+                    return word * 64 + static_cast<std::size_t>(std::countr_zero(occupied_[word]));
                 }
-                qty_[index] = level_qty;
-                occupy(index);
             }
         } else {
-            base_ = shifted;
+            for (std::size_t word = occupied_.size(); word-- > 0;) {
+                if (occupied_[word] != 0) {
+                    return word * 64 + 63 - static_cast<std::size_t>(std::countl_zero(occupied_[word]));
+                }
+            }
         }
-        ++rebases_;
+        return kEmpty;
     }
 
     void occupy(std::size_t index) {
@@ -328,15 +396,6 @@ private:
     /// Price the window spans. `ticks * tick`, and neither changes, so it is
     /// stored rather than recomputed on a path that runs per message.
     std::uint64_t span_;
-    /// Scratch for `rebase`, owned so shifting the window allocates nothing.
-    /// It settles at the deepest the book has been.
-    ///
-    /// A rebase is O(live levels) because it replaces each one. It could be
-    /// O(width) at memmove speed: the base always moves by a whole number of
-    /// ticks, so every level moves by the same index delta, which makes the
-    /// quantity array a `memmove` and the bitmap a word-and-bit shift. That is
-    /// the better structure and it is not here yet.
-    std::vector<std::pair<std::int64_t, std::int64_t>> live_;
     std::size_t best_{kEmpty};
     bool descending_;
     std::size_t len_{0};

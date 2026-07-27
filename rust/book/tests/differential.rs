@@ -287,6 +287,89 @@ fn a_deep_book_keeps_its_depth_as_the_market_moves() {
     assert!(ladder.rebases() >= 2, "the window never moved, so nothing was proven");
 }
 
+/// Shifting the window drops exactly the levels it strands and keeps the
+/// rest untouched -- both directions, with survivors and with none.
+///
+/// The other differential tests all run with nothing evicted, which leaves
+/// the eviction accounting itself unpinned: an off-by-one in the dropped
+/// range passes every one of them. This test is the one that fails.
+#[test]
+fn a_window_shift_evicts_exactly_the_levels_it_strands() {
+    let mut ladder = Ladder::bids(Band { tick: 1, ticks: 4_096 });
+    let mut reference: BTreeMap<i64, i64> = BTreeMap::new();
+    let touch = 1_000_000_i64;
+    for level in 0..2_500 {
+        ladder.set(touch - level, 10 + level);
+        reference.insert(touch - level, 10 + level);
+    }
+    assert_eq!(ladder.evicted(), 0, "the build fits inside one window");
+
+    // Up: the market gaps half a window higher, stranding the lowest levels.
+    let up = touch + 2_048;
+    let before = ladder.depth();
+    ladder.set(up, 7);
+    reference.insert(up, 7);
+    let dropped = ladder.evicted() as usize;
+    assert!(dropped > 0, "a half-window gap must strand something");
+    assert_eq!(
+        ladder.depth() + dropped,
+        before + 1,
+        "every level is either held or counted evicted, never both or neither"
+    );
+    // The survivors are exactly the highest levels the reference holds, and
+    // the depth counter agrees with a walk of the bitmap itself. The walk is
+    // the ground truth: a count that drifts from it cannot hide behind the
+    // identity above, whose two sides drift together.
+    let mut held = Vec::new();
+    ladder.for_each_from_touch(|price, qty| held.push((price, qty)));
+    assert_eq!(ladder.depth(), held.len(), "the depth counter drifted from the bitmap");
+    let expected: Vec<(i64, i64)> = reference
+        .iter()
+        .rev()
+        .take(held.len())
+        .map(|(price, qty)| (*price, *qty))
+        .collect();
+    assert_eq!(held, expected, "a survivor moved or changed quantity");
+
+    // A jump wider than the window drops everything it held.
+    let far = up + 100_000;
+    let held_now = ladder.depth() as u64;
+    let evicted_before = ladder.evicted();
+    ladder.set(far, 3);
+    assert_eq!(ladder.evicted(), evicted_before + held_now);
+    assert_eq!(ladder.depth(), 1);
+    assert_eq!(ladder.best(), Some((far, 3)));
+
+    // Down: rebuild below the survivor, then gap down far enough to strand
+    // the top of the book but not all of it.
+    let mut reference: BTreeMap<i64, i64> = BTreeMap::new();
+    reference.insert(far, 3);
+    for level in 1..2_500 {
+        ladder.set(far - level, 20 + level);
+        reference.insert(far - level, 20 + level);
+    }
+    let evicted_before = ladder.evicted() as usize;
+    let before = ladder.depth();
+    let down = far - 4_600;
+    ladder.set(down, 5);
+    reference.insert(down, 5);
+    let dropped = ladder.evicted() as usize - evicted_before;
+    assert!(dropped > 0, "the gap down must strand the top of the book");
+    assert_eq!(ladder.depth() + dropped, before + 1);
+    // The strands are the highest prices, so the ladder holds everything
+    // below them: the reference minus its top `dropped` levels.
+    let mut held = Vec::new();
+    ladder.for_each_from_touch(|price, qty| held.push((price, qty)));
+    assert_eq!(ladder.depth(), held.len(), "the depth counter drifted from the bitmap");
+    let expected: Vec<(i64, i64)> = reference
+        .iter()
+        .rev()
+        .skip(dropped)
+        .map(|(price, qty)| (*price, *qty))
+        .collect();
+    assert_eq!(held, expected, "a survivor moved or changed quantity");
+}
+
 #[test]
 fn an_off_grid_price_is_refused_rather_than_rounded() {
     let mut books = Books::new(1, Band { tick: 100, ticks: 256 });

@@ -80,6 +80,9 @@ One structure, any instrument, no range declared in advance.
 - **Window follows the market.** Dense array over a slice of the price grid.
   Shifts the minimum that admits the price plus a quarter window of hysteresis.
   Centring would discard half the depth — the deep-book test catches that.
+- **A shift is a memmove.** Every level moves by the same index delta, so the
+  carry is one `copy_within` plus a bitmap shift, not a per-level replay:
+  **9,389 → 428 ns** for a 2,500-level book, no allocation, no scratch.
 - **Price to index is a multiply.** A runtime tick makes `(price - base) / tick`
   a hardware divide per message. A reciprocal computed once replaces it with a
   multiply and a shift, exact rather than approximate-then-fixed.
@@ -180,8 +183,9 @@ cd cpp && g++ -std=c++20 -O1 -g -fsanitize=thread -pthread tests/test_spsc.cpp -
   unknown-order counts.
 - Ring orderings loom-model-checked and TSAN-checked.
 - Every checker mutation-tested — the ladder's window strategy, its reciprocal
-  rounding, and the ring's orderings were each broken on purpose to confirm a
-  test fails. Benchmarks that could not discriminate were deleted.
+  rounding, the shift's carry direction and eviction ranges, and the ring's
+  orderings were each broken on purpose to confirm a test fails, in both
+  languages. Benchmarks that could not discriminate were deleted.
 
 ## Not here
 

@@ -223,4 +223,34 @@ fn main() {
         }
         map.len() as u64
     });
+
+    // The cold path, priced: what a window shift adds to the one message that
+    // triggers it, with a deep book resident. Only the boundary-crossing call
+    // is timed; the rebuild between shifts is not.
+    let depth: i64 = 2_500;
+    let shifts = 200;
+    let mut best = f64::MAX;
+    let mut check = 0_u64;
+    for _ in 0..RUNS {
+        let mut total = 0.0;
+        check = 0;
+        for round in 0..shifts {
+            let mut ladder = Ladder::bids(t2t_book::Band { tick: 1, ticks: 4_096 });
+            let touch = 1_000_000 + round as i64;
+            for level in 0..depth {
+                ladder.set(touch - level, 10 + level);
+            }
+            let started = Instant::now();
+            ladder.set(touch + 2_048, 7);
+            total += started.elapsed().as_secs_f64();
+            let (price, qty) = ladder.best().expect("the shifted-in level rests");
+            check ^= (price as u64).wrapping_mul(31).wrapping_add(qty as u64)
+                ^ ladder.evicted() ^ ladder.depth() as u64;
+        }
+        best = best.min(total / shifts as f64);
+    }
+    println!(
+        "ladder: window shift, 2500 levels  best {:>8.0} ns/shift   (check {check})",
+        best * 1e9
+    );
 }
