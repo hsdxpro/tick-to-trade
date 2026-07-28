@@ -23,6 +23,30 @@ UDP ticks → [parse + book + BBO] →ring→ [strategy] →ring→ [gateway] �
 - T0/T1 are stamped at the **counterparty**, never by the engine about itself.
 - Windows clock quantizes near 100 ns. `min 0` is the instrument's floor.
 
+### Closed loop against open loop
+
+Those rows send a probe, wait for its order, send the next — one in flight, so
+they measure service time with no queue in front of it. A harness that does
+only that flatters the system it measures: when the pipeline stalls it politely
+stops sending, and the stall never lands in a sample. `--rate` holds a schedule
+instead and charges every probe from when it was **due**.
+
+| Mode | p50 | p99 | p99.9 | max |
+|---|---:|---:|---:|---:|
+| Closed loop, 1 in flight | 10.4 µs | 37.5 µs | 300.9 µs | 1.68 ms |
+| Open loop, 10,000/sec | 13.4 µs | 916.6 µs | 1.70 ms | 2.41 ms |
+| Open loop, 50,000/sec | 10.3 µs | **1.27 ms** | 2.61 ms | 2.86 ms |
+
+- **The median barely moves; the tail goes 34× at p99.** Service time was never
+  the question — queueing was, and closed loop cannot see it.
+- **This tail is the host, not the pipeline.** Closed loop already shows a
+  1.68 ms max on an idle machine, so millisecond hiccups exist before any load
+  is applied; open loop merely makes one stall punish everything queued behind
+  it. A trading host isolates cores, pins interrupts and disables C-states.
+  This is a Windows desktop over loopback with the generator sharing its CPUs.
+- What the repository can claim is the **method**: measured from the schedule,
+  not from departure. What it cannot claim from this machine is a tail figure.
+
 ## Where the time goes
 
 Amortized over a million probes. Each probe carries two ITCH messages, so the
