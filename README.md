@@ -88,7 +88,7 @@ of the FIX parser, which is the whole reason the bound sits where it does.
 | Structure | Custom | Standard | Gain |
 |---|---:|---:|---:|
 | Ladder, isolated (Rust) | 2.3 ms | BTreeMap 27.9 ms | **12×** |
-| Order map, isolated (Rust) | 33.3 ms | HashMap 48.9 ms | 1.5× |
+| Order map, isolated (Rust) | 37.1 ms | HashMap 46.0 ms | 1.2× |
 | Book blended, Rust | 39.9 ns/ev | 90.7 ns/ev | 2.3× |
 | Book blended, C++ | 53.9 ns/ev | std::map 239.4 ns/ev | 4.4× |
 | SPSC ring, 20M items | 1.6 ns/item | sync_channel 13.9, crossbeam 27.5 | **8.7×** |
@@ -96,7 +96,10 @@ of the FIX parser, which is the whole reason the bound sits where it does.
 - The order map's key and value arrays were separate allocations, so a
   successful lookup paid two cache misses. Interleaving them into one array
   cut the book stage 17% and the whole internal path from 96.3 ns to 86.0.
-- Book rows: same 992,670 operations, identical final state.
+- Book rows: same 992,670 operations, identical final state. The order-map row
+  measures `reduce` -- take quantity off, drop the order if that finished it --
+  against the same thing spelled out on a `HashMap`, because serving one
+  execution is the question, not what a single method costs alone.
 - The first ladder was a sorted array. It lost to `BTreeMap` and was deleted —
   the rule that killed it is the point.
 - Not strawmen: crossbeam's `ArrayQueue` pays for MPMC, `sync_channel` for

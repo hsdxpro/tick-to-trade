@@ -191,10 +191,13 @@ fn main() {
         for op in &map_ops {
             match op {
                 MapOp::Insert(key, order) => map.insert(*key, *order),
+                // `reduce` is the operation the book performs: take quantity
+                // off, and drop the order if that finished it. The std row
+                // below spells the same thing out, which is the comparison
+                // that matters -- what each structure costs to serve one
+                // execution, not what one of its methods costs alone.
                 MapOp::Reduce(key, taken) => {
-                    if let Some(order) = map.get_mut(*key) {
-                        order.qty -= taken;
-                    }
+                    map.reduce(*key, *taken);
                 }
                 MapOp::Remove(key) => {
                     map.remove(*key);
@@ -214,6 +217,9 @@ fn main() {
                 MapOp::Reduce(key, taken) => {
                     if let Some(order) = map.get_mut(key) {
                         order.qty -= taken;
+                        if order.qty == 0 {
+                            map.remove(key);
+                        }
                     }
                 }
                 MapOp::Remove(key) => {

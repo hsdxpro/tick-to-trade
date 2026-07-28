@@ -46,6 +46,20 @@ struct Band {
     std::size_t ticks;
 };
 
+/// What one execution or cancel took off an order.
+///
+/// Named rather than a tuple because three of these four fields are only
+/// meaningful together, and a caller that mixes up `price` and `taken` gets a
+/// book that is wrong in a way nothing reports.
+struct Reduced {
+    Side side{Side::Bid};
+    std::int64_t price{0};
+    /// How much came off, which is `want` clamped to what was resting.
+    std::int64_t taken{0};
+    /// Whether the order is finished and no longer in the table.
+    bool emptied{false};
+};
+
 /// An order as the L3 book holds it.
 struct Order {
     std::uint16_t symbol{0};
@@ -419,6 +433,10 @@ struct Slot {
 
 class OrderMap final {
 public:
+    /// No slot index, for `find_slot`. Distinct from `Ladder::kEmpty` only in
+    /// which structure it belongs to; both mean "nothing here".
+    static constexpr std::size_t kEmpty = static_cast<std::size_t>(-1);
+
     explicit OrderMap(std::size_t capacity) {
         auto size = std::bit_ceil(std::max<std::size_t>(capacity, 16)) * 2;
         slots_.assign(size, Slot{});
@@ -464,19 +482,54 @@ public:
         }
     }
 
+    /// Takes up to `want` from an order, removing it if nothing remains.
+    ///
+    /// One probe for what the book asks on every execution and every cancel:
+    /// how much came off, from which side and price, and whether the order is
+    /// finished. Reading the order and then removing it asks the table the
+    /// same question twice -- two hashes, two walks of one bucket -- and on a
+    /// table of any size the second walk is its own cache miss.
+    std::optional<Reduced> reduce(std::uint64_t key, std::int64_t want) {
+        const auto at = find_slot(key);
+        if (at == kEmpty) {
+            return std::nullopt;
+        }
+        auto& order = slots_[at].order;
+        const auto taken = std::min(want, order.qty);
+        order.qty -= taken;
+        const Reduced hit{order.side, order.price, taken, order.qty == 0};
+        if (hit.emptied) {
+            vacate(at);
+        }
+        return hit;
+    }
+
     /// Removes and returns the order, closing the probe gap by shifting
     /// followers back so lookups never wade through tombstones.
     std::optional<Order> remove(std::uint64_t key) {
-        auto at = slot(key);
-        for (;; at = (at + 1) & mask_) {
-            if (slots_[at].key == 0) {
-                return std::nullopt;
-            }
-            if (slots_[at].key == key) {
-                break;
-            }
+        const auto at = find_slot(key);
+        if (at == kEmpty) {
+            return std::nullopt;
         }
         const auto removed = slots_[at].order;
+        vacate(at);
+        return removed;
+    }
+
+    /// The slot holding `key`, or `kEmpty`.
+    [[nodiscard]] std::size_t find_slot(std::uint64_t key) const {
+        for (auto at = slot(key);; at = (at + 1) & mask_) {
+            if (slots_[at].key == 0) {
+                return kEmpty;
+            }
+            if (slots_[at].key == key) {
+                return at;
+            }
+        }
+    }
+
+    /// Empties a slot already known to hold an entry, closing the probe gap.
+    void vacate(std::size_t at) {
         --len_;
         auto hole = at;
         for (auto probe = (at + 1) & mask_; slots_[probe].key != 0; probe = (probe + 1) & mask_) {
@@ -488,7 +541,6 @@ public:
             }
         }
         slots_[hole].key = 0;
-        return removed;
     }
 
     [[nodiscard]] std::size_t size() const { return len_; }
@@ -554,19 +606,12 @@ public:
                 break;
             case Kind::Execute:
             case Kind::Cancel: {
-                auto* order = book.orders.find(event.order_id);
-                if (order == nullptr) {
+                const auto hit = book.orders.reduce(event.order_id, event.qty);
+                if (!hit.has_value()) {
                     ++unknown_orders_;
                     return;
                 }
-                const auto taken = std::min(event.qty, order->qty);
-                order->qty -= taken;
-                const auto side = order->side;
-                const auto price = order->price;
-                if (order->qty == 0) {
-                    book.orders.remove(event.order_id);
-                }
-                book.side(side).add(price, -taken);
+                book.side(hit->side).add(hit->price, -hit->taken);
                 break;
             }
             case Kind::Delete: {

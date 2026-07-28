@@ -522,6 +522,21 @@ impl Ladder {
     }
 }
 
+/// What one execution or cancel took off an order.
+///
+/// Named rather than a tuple because three of these four fields are only
+/// meaningful together, and a caller that mixes up `price` and `taken` gets a
+/// book that is wrong in a way nothing reports.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Reduced {
+    pub side: Side,
+    pub price: i64,
+    /// How much came off, which is `want` clamped to what was resting.
+    pub taken: i64,
+    /// Whether the order is finished and no longer in the table.
+    pub emptied: bool,
+}
+
 /// An order as the L3 book holds it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Order {
@@ -638,12 +653,38 @@ impl OrderMap {
         }
     }
 
-    pub fn get_mut(&mut self, key: u64) -> Option<&mut Order> {
+    /// Takes up to `want` from an order, removing it if nothing remains.
+    ///
+    /// One probe for what the book asks on every execution and every cancel:
+    /// how much came off, from which side and price, and whether the order is
+    /// finished. Reading the order and then removing it asks the table the
+    /// same question twice -- two hashes, two walks of one bucket -- and on a
+    /// table of any size the second walk is its own cache miss.
+    pub fn reduce(&mut self, key: u64, want: i64) -> Option<Reduced> {
+        let at = self.find(key)?;
+        let order = &mut self.slots[at].order;
+        let taken = want.min(order.qty);
+        order.qty -= taken;
+        let reduced = Reduced {
+            side: order.side,
+            price: order.price,
+            taken,
+            emptied: order.qty == 0,
+        };
+        if reduced.emptied {
+            self.vacate(at);
+        }
+        Some(reduced)
+    }
+
+    /// The slot holding `key`, or `None`.
+    #[inline]
+    fn find(&self, key: u64) -> Option<usize> {
         let mut at = self.slot(key);
         loop {
             match self.slots[at].key {
                 0 => return None,
-                held if held == key => return Some(&mut self.slots[at].order),
+                held if held == key => return Some(at),
                 _ => at = (at + 1) & self.mask,
             }
         }
@@ -653,15 +694,15 @@ impl OrderMap {
     /// followers back -- so lookups never wade through tombstones, no matter
     /// how many billions of cancels have passed through.
     pub fn remove(&mut self, key: u64) -> Option<Order> {
-        let mut at = self.slot(key);
-        loop {
-            match self.slots[at].key {
-                0 => return None,
-                held if held == key => break,
-                _ => at = (at + 1) & self.mask,
-            }
-        }
+        let at = self.find(key)?;
         let removed = self.slots[at].order;
+        self.vacate(at);
+        Some(removed)
+    }
+
+    /// Empties a slot already known to hold an entry, closing the probe gap
+    /// behind it.
+    fn vacate(&mut self, at: usize) {
         self.len -= 1;
         // Backward-shift: any follower whose home slot is at or before the
         // hole moves into it, until an empty slot ends the cluster.
@@ -684,7 +725,6 @@ impl OrderMap {
             probe = (probe + 1) & self.mask;
         }
         self.slots[hole].key = 0;
-        Some(removed)
     }
 
     #[must_use]
@@ -774,17 +814,11 @@ impl Books {
                 book.side_mut(event.side).add(event.price, event.qty);
             }
             Kind::Execute | Kind::Cancel => {
-                let Some(order) = book.orders.get_mut(event.order_id) else {
+                let Some(hit) = book.orders.reduce(event.order_id, event.qty) else {
                     self.unknown_orders += 1;
                     return;
                 };
-                let taken = event.qty.min(order.qty);
-                order.qty -= taken;
-                let (side, price, gone) = (order.side, order.price, order.qty == 0);
-                if gone {
-                    book.orders.remove(event.order_id);
-                }
-                book.side_mut(side).add(price, -taken);
+                book.side_mut(hit.side).add(hit.price, -hit.taken);
             }
             Kind::Delete => {
                 let Some(order) = book.orders.remove(event.order_id) else {
