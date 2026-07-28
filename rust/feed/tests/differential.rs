@@ -106,6 +106,20 @@ fn json_survives_every_truncation() {
 /// a length, a tag, a delimiter -- anywhere -- must produce an error or a
 /// clean early stop, never a wrong event that compares equal to a real one.
 #[test]
+fn a_length_no_integer_can_hold_is_refused_not_a_crash() {
+    // Nineteen nines overflow an i64. Before the digit cap, the wrapped
+    // value framed a message end past every bound and the parser panicked on
+    // the slice -- a malformed field must never cost more than a rejection.
+    let stream = b"8=FIX.4.49=999999999999999999935=W10=000";
+    let parser = t2t_feed::fix::Fix { symbols: synth::TRADFI };
+    let mut sink = |_: &t2t_feed::Event| {};
+    assert!(matches!(
+        parser.parse(stream, &mut sink),
+        Err(t2t_feed::FeedError::Malformed { .. })
+    ));
+}
+
+#[test]
 fn corrupted_streams_are_refused_not_reinterpreted() {
     let mut rng = Rng(GENERATOR_SEED ^ 0xdead);
     let cases: [(&str, synth::Generated); 3] = [

@@ -10,6 +10,7 @@
 #include "../feed/synth.hpp"
 
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <vector>
 
@@ -91,9 +92,27 @@ void truncation(const char* name, const synth::Generated& generated, const Parse
     }
 }
 
+/// Nineteen nines overflow an int64. Before the digit cap, accumulating them
+/// was signed overflow and the wrapped value framed a message end past every
+/// bound -- a malformed field must never cost more than a rejection.
+void a_length_no_integer_can_hold_is_refused_not_a_crash() {
+    const char* text = "8=FIX.4.4" "9=9999999999999999999" "35=W" "10=000";
+    const auto* bytes = reinterpret_cast<const std::byte*>(text);
+    struct Drop {
+        void operator()(const Event&) const {}
+    } sink;
+    const auto outcome =
+        Fix<Drop>{synth::kTradfi}.parse(Bytes{bytes, std::strlen(text)}, sink);
+    if (outcome.ok() || outcome.error != Error::Malformed) {
+        ++failures;
+        std::printf("FAIL: an overflowing length was not refused as malformed\n");
+    }
+}
+
 } // namespace
 
 int main() {
+    a_length_no_integer_can_hold_is_refused_not_a_crash();
     Rng itch_rng{kGeneratorSeed};
     const auto itch_stream = synth::itch(100'000, itch_rng);
     roundtrip("itch", itch_stream, Itch<CollectSink>{synth::kTradfi});

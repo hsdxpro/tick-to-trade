@@ -133,7 +133,9 @@ cpp/            protocol-identical twins  MSVC + GCC, TSAN on Linux
 ```
 
 One event type crosses the system; no stage knows its wire format. Prices are
-fixed-point 1e8 — floats never appear.
+fixed-point 1e8 — floats never appear. The deployable engine binary is the
+Rust one; the C++ side ships the same stages, parsers and structures, benched
+identically, without the Mold/session wiring.
 
 ## Run
 
@@ -182,6 +184,7 @@ cd cpp && g++ -std=c++20 -O1 -g -fsanitize=thread -pthread tests/test_spsc.cpp -
 - Books compared against std-collection references: full ladders, order state,
   unknown-order counts.
 - Ring orderings loom-model-checked and TSAN-checked.
+- Both C++ suites run clean under ASan and UBSan (GCC, Linux).
 - Every checker mutation-tested — the ladder's window strategy, its reciprocal
   rounding, the shift's carry direction and eviction ranges, and the ring's
   orderings were each broken on purpose to confirm a test fails, in both

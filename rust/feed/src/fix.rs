@@ -59,7 +59,10 @@ fn pair<'b>(bytes: &'b [u8], at: &mut usize, start: usize) -> Result<(u32, &'b [
 
 #[inline]
 fn int(value: &[u8], at: usize) -> Result<i64, FeedError> {
-    if value.is_empty() {
+    // Eighteen digits fit i64 with room to spare; no FIX engine sends more.
+    // Letting a longer run of digits wrap turned one malformed length field
+    // into an out-of-range frame end, which is a crash rather than a reject.
+    if value.is_empty() || value.len() > 18 {
         return Err(FeedError::Malformed { offset: at });
     }
     let mut out = 0_i64;

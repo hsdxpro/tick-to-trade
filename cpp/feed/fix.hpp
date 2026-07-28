@@ -112,7 +112,9 @@ private:
     }
 
     static bool integer(Bytes bytes, const Pair& pair, std::int64_t& out) {
-        if (pair.value_len == 0) return false;
+        // Eighteen digits fit int64 with room to spare; no FIX engine sends
+        // more, and a longer run would overflow the accumulation below.
+        if (pair.value_len == 0 || pair.value_len > 18) return false;
         std::int64_t value = 0;
         for (std::size_t i = 0; i < pair.value_len; ++i) {
             const auto byte = at(bytes, pair.value_from + i);

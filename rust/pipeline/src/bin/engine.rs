@@ -81,15 +81,34 @@ fn main() -> std::io::Result<()> {
                         eprintln!("engine: undecodable payload dropped");
                         continue;
                     }
+                    // Delivery may have been the packet a stashed one was
+                    // waiting on. Without this drain, a routine UDP reorder
+                    // stranded the early packet until the stream declared
+                    // itself unrecoverable -- the arbitrator was wired in,
+                    // its recovery path was not.
+                    arbitrator.drain_stash(|stashed| {
+                        if parser.parse(stashed, &mut sink).is_err() {
+                            eprintln!("engine: undecodable stashed payload dropped");
+                        }
+                    });
                 }
                 // The other line's copy of something already delivered.
                 Admit::Duplicate => continue,
-                // Both lines lost data. A venue-grade handler asks the rewind
+                // Ahead of a hole. The packet is stashed; the other line's
+                // copy -- or the reordered original on this one -- fills the
+                // hole and the drain above releases it. Resynchronizing here
+                // would abandon the hole and drop the late packet as a
+                // duplicate, turning every reorder into silent book loss.
+                Admit::Gap { missing } => {
+                    eprintln!("engine: {missing} message(s) in flight behind a gap");
+                    continue;
+                }
+                // Wider than the stash. A venue-grade handler asks the rewind
                 // server; this one reports and resynchronizes, because
                 // inventing a recovery channel the harness does not serve
                 // would be scaffolding pretending to be a feature.
-                Admit::Gap { missing } | Admit::Unrecoverable { missing } => {
-                    eprintln!("engine: {missing} messages lost on both lines");
+                Admit::Unrecoverable { missing } => {
+                    eprintln!("engine: {missing} messages lost beyond recovery");
                     arbitrator.resynchronize(header.session, header.sequence);
                     continue;
                 }
@@ -147,6 +166,11 @@ fn main() -> std::io::Result<()> {
     const POLL_EVERY: u32 = 4_096;
     let mut idle = 0_u32;
     let mut inbound = [0_u8; 8];
+    // TCP owes no respect to message boundaries, so an acknowledgement can
+    // arrive split. Bytes accumulate until eight are held; treating a short
+    // read as noise instead misaligned the stream for good, and every later
+    // "acknowledgement" was garbage that freed retained slots early.
+    let mut inbound_filled = 0_usize;
 
     loop {
         if let Some(order) = from_strategy.try_pop() {
@@ -164,13 +188,20 @@ fn main() -> std::io::Result<()> {
         idle = idle.wrapping_add(1);
         if idle.is_multiple_of(POLL_EVERY) {
             // The venue acknowledges with the highest sequence it holds.
-            match orders.read(&mut inbound) {
-                Ok(8) => session.received(
-                    Inbound::Acknowledged(u64::from_le_bytes(inbound)),
-                    Instant::now(),
-                ),
+            match orders.read(&mut inbound[inbound_filled..]) {
                 Ok(0) => return Ok(()), // venue closed
-                Ok(_) | Err(_) => {}    // partial or nothing waiting
+                Ok(bytes) => {
+                    inbound_filled += bytes;
+                    if inbound_filled == inbound.len() {
+                        inbound_filled = 0;
+                        session.received(
+                            Inbound::Acknowledged(u64::from_le_bytes(inbound)),
+                            Instant::now(),
+                        );
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(_) => return Ok(()), // venue gone; the deadline would say so later
             }
             match session.due(Instant::now()) {
                 Action::Idle => {}
