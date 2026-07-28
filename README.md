@@ -77,9 +77,9 @@ bound costs nothing: the digits wrap deliberately and the length is checked
 once per field. Testing it per digit was the obvious way and measured **18%**
 of the FIX parser, which is the whole reason the bound sits where it does.
 
-- The GCC column answers the MSVC column: same C++ source beats Rust on FIX,
-  matches on JSON. The Windows gap is MSVC's backend, not the code.
-- ITCH is the one format where LLVM leads on both sides, by ~1.3 ns.
+- The GCC column answers the MSVC column: same C++ source beats Rust on FIX
+  and JSON. The Windows gap is MSVC's backend, not the code.
+- ITCH is the one format where LLVM leads on both sides, by ~1 ns.
 - `serde_json` parses arbitrary JSON; the scanner parses one schema. That gap
   is what knowing the schema is worth.
 
