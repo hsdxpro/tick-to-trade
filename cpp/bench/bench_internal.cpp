@@ -13,6 +13,15 @@
 
 namespace {
 
+/// Keeps a value observable so the optimizer cannot delete the work that
+/// produced it -- the stand-in for Rust's `std::hint::black_box`. A discarded
+/// `(void)` cast keeps the *name* used while leaving the computation dead.
+template <typename T>
+void observe(const T& value) {
+    const volatile auto* keep = reinterpret_cast<const volatile unsigned char*>(&value);
+    static_cast<void>(*keep);
+}
+
 using namespace t2t;
 using namespace t2t::pipeline;
 
@@ -55,7 +64,10 @@ void compute_path() {
 
     for (std::size_t index = 0; index < datagrams.size(); ++index) {
         const auto started = Clock::now();
-        (void)parser.parse(datagrams[index], stage);
+        if (!parser.parse(datagrams[index], stage).ok()) {
+            std::printf("compute path: parse failed mid-benchmark\n");
+            return;
+        }
         if (const auto update = stage.take_moved()) {
             if (const auto order = strategy.decide(*update)) {
                 const auto encoded = order->encode();
@@ -88,7 +100,12 @@ void staged_path() {
             std::optional<std::pair<std::size_t, Clock::time_point>> item;
             while (!(item = to_feed.try_pop())) {
             }
-            (void)parser.parse(datagrams[item->first], stage);
+            if (!parser.parse(datagrams[item->first], stage).ok()) {
+                // A worker cannot report through the samples, and a bench
+                // quietly measuring the error path is worse than no bench.
+                std::printf("staged path: parse failed mid-benchmark\n");
+                std::abort();
+            }
             if (const auto update = stage.take_moved()) {
                 auto out = std::pair{*update, item->second};
                 while (!to_strategy.try_push(std::move(out))) {
@@ -123,7 +140,7 @@ void staged_path() {
         const auto encoded = answer->first.encode();
         const auto elapsed =
             std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - answer->second);
-        (void)encoded;
+        observe(encoded);
         if (index >= kWarmup) {
             samples.push_back(static_cast<std::uint64_t>(elapsed.count()));
         }

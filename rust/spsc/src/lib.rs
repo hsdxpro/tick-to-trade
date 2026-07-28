@@ -70,10 +70,12 @@ struct Shared<T> {
     mask: usize,
 }
 
-// The protocol above is exactly the argument for these: distinct slots are
-// handed across threads by the Release/Acquire pairs, and no slot is reachable
-// by both sides at once.
+// SAFETY: the protocol above is exactly the argument. Distinct slots are
+// handed across threads by the Release/Acquire pairs, and no slot is
+// reachable by both sides at once, so sharing `Shared` is sound whenever the
+// items themselves may cross threads.
 unsafe impl<T: Send> Send for Shared<T> {}
+// SAFETY: as above -- the two halves never touch the same slot concurrently.
 unsafe impl<T: Send> Sync for Shared<T> {}
 
 impl<T> std::fmt::Debug for Shared<T> {
@@ -176,8 +178,9 @@ impl<T> Producer<T> {
         }
 
         let slot = &self.shared.buffer[self.head & self.shared.mask];
-        // Sound because the emptiness check above proved the consumer cannot
-        // reach this slot until the Release store below publishes it.
+        // SAFETY: the fullness check above proved the consumer cannot reach
+        // this slot until the Release store below publishes it, so the write
+        // is unaliased.
         #[cfg(loom)]
         slot.with_mut(|p| unsafe { (*p).write(value) });
         #[cfg(not(loom))]
@@ -221,9 +224,9 @@ impl<T> Consumer<T> {
         }
 
         let slot = &self.shared.buffer[self.tail & self.shared.mask];
-        // Sound because the fullness check proved the producer published this
-        // slot and cannot touch it again until the Release store below hands
-        // it back.
+        // SAFETY: the emptiness check proved the producer published this slot
+        // -- so it is initialized -- and cannot touch it again until the
+        // Release store below hands it back.
         #[cfg(loom)]
         let value = slot.with_mut(|p| unsafe { (*p).assume_init_read() });
         #[cfg(not(loom))]
@@ -268,6 +271,9 @@ impl<T> Drop for Shared<T> {
         );
         for index in tail..head {
             let slot = &mut self.buffer[index & self.mask];
+            // SAFETY: this drop runs on the last owner, so no other thread
+            // exists, and `tail..head` is precisely the initialized,
+            // unconsumed range.
             #[cfg(loom)]
             slot.with_mut(|p| unsafe { (*p).assume_init_drop() });
             #[cfg(not(loom))]

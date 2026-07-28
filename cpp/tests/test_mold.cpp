@@ -13,6 +13,12 @@ using namespace t2t::feed::mold;
 
 int failures = 0;
 
+/// A failure that is a statement rather than a negated string literal.
+void fail(const char* what) {
+    ++failures;
+    std::printf("FAIL: %s\n", what);
+}
+
 #define REQUIRE(expr)                                                       \
     do {                                                                    \
         if (!(expr)) {                                                      \
@@ -102,14 +108,17 @@ void two_lossy_lines_deliver_every_sequence_exactly_once() {
             if (!arrived) continue;
             switch (arbitrator.admit(header(sequence, 1), {})) {
                 case Admit::Deliver:
-                    if (delivered) { REQUIRE(!"delivered twice"); return; }
+                    if (delivered) {
+                        fail("delivered twice");
+                        return;
+                    }
                     delivered = true;
                     seen.push_back(sequence);
                     break;
                 case Admit::Duplicate:
                     break;
                 default:
-                    REQUIRE(!"unexpected admit outcome");
+                    fail("unexpected admit outcome");
                     return;
             }
         }
@@ -123,7 +132,7 @@ void two_lossy_lines_deliver_every_sequence_exactly_once() {
     REQUIRE(seen.size() == 20'000);
     for (std::size_t i = 1; i < seen.size(); ++i) {
         if (seen[i] != seen[i - 1] + 1) {
-            REQUIRE(!"sequences arrived out of order");
+            fail("sequences arrived out of order");
             return;
         }
     }

@@ -453,6 +453,17 @@ public:
         }
     }
 
+    [[nodiscard]] const Order* find(std::uint64_t key) const {
+        for (auto at = slot(key);; at = (at + 1) & mask_) {
+            if (slots_[at].key == 0) {
+                return nullptr;
+            }
+            if (slots_[at].key == key) {
+                return &slots_[at].order;
+            }
+        }
+    }
+
     /// Removes and returns the order, closing the probe gap by shifting
     /// followers back so lookups never wade through tombstones.
     std::optional<Order> remove(std::uint64_t key) {

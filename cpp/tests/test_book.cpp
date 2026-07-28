@@ -21,6 +21,12 @@ using namespace t2t::book;
 
 int failures = 0;
 
+/// A failure that is a statement rather than a negated string literal.
+void fail(const char* what) {
+    ++failures;
+    std::printf("FAIL: %s\n", what);
+}
+
 #define REQUIRE(expr)                                                       \
     do {                                                                    \
         if (!(expr)) {                                                      \
@@ -57,12 +63,12 @@ bool agree(const Books& books, const ReferenceBooks& reference, std::size_t at_e
             std::printf("FAIL: ask ladder diverged on symbol %zu\n", index);
             return false;
         }
-        if (const_cast<SymbolBook&>(custom).orders.size() != std_book.orders.size()) {
+        if (custom.orders.size() != std_book.orders.size()) {
             std::printf("FAIL: order count diverged on symbol %zu\n", index);
             return false;
         }
         for (const auto& [id, order] : std_book.orders) {
-            auto* held = const_cast<SymbolBook&>(custom).orders.find(id);
+            const auto* held = custom.orders.find(id);
             if (held == nullptr || !(*held == order)) {
                 std::printf("FAIL: order %llu diverged on symbol %zu\n",
                             static_cast<unsigned long long>(id), index);
@@ -114,7 +120,7 @@ void order_map_survives_churn_against_unordered_map() {
             const auto it = reference.find(key);
             const bool theirs = it != reference.end();
             if (mine.has_value() != theirs || (theirs && !(*mine == it->second))) {
-                REQUIRE(!"removal diverged");
+                fail("removal diverged");
                 return;
             }
             if (theirs) {
