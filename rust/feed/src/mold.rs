@@ -101,6 +101,11 @@ pub struct Arbitrator {
     stash: Box<[[u8; STASH_PAYLOAD]]>,
     stash_len: [u16; STASH],
     stash_held: [bool; STASH],
+    /// The stashed datagram's own header fields. The sequence proves a held
+    /// slot belongs to the present rather than a lapped generation, and the
+    /// count is how far delivering it advances the stream.
+    stash_sequence: [u64; STASH],
+    stash_count: [u16; STASH],
     delivered: u64,
     duplicates: u64,
     gaps: u64,
@@ -127,6 +132,8 @@ impl Arbitrator {
             expected: first_sequence,
             stash: vec![[0_u8; STASH_PAYLOAD]; STASH].into_boxed_slice(),
             stash_len: [0; STASH],
+            stash_sequence: [0; STASH],
+            stash_count: [0; STASH],
             stash_held: [false; STASH],
             delivered: 0,
             duplicates: 0,
@@ -169,6 +176,8 @@ impl Arbitrator {
         let slot = (header.sequence % STASH as u64) as usize;
         self.stash[slot][..payload.len()].copy_from_slice(payload);
         self.stash_len[slot] = payload.len() as u16;
+        self.stash_sequence[slot] = header.sequence;
+        self.stash_count[slot] = header.count;
         self.stash_held[slot] = true;
         Admit::Gap { missing }
     }
@@ -184,15 +193,26 @@ impl Arbitrator {
             if !self.stash_held[slot] {
                 return;
             }
+            // A held slot whose sequence is not the expected one is a relic
+            // the window advanced past without needing. Delivering it would
+            // hand the stream stale bytes under a current sequence number,
+            // which is the corruption nobody notices; it is discarded instead.
+            if self.stash_sequence[slot] != self.expected {
+                self.stash_held[slot] = false;
+                continue;
+            }
             let length = self.stash_len[slot] as usize;
             deliver(&self.stash[slot][..length]);
             self.stash_held[slot] = false;
             self.recovered += 1;
             self.delivered += 1;
-            // A stashed packet's own count is not known here; MoldUDP64
-            // recovery replays one sequence at a time, so advancing by one is
-            // the contract.
-            self.expected += 1;
+            // A datagram carries its own message count and the sequence space
+            // is counted in messages, so a recovered two-message datagram
+            // moves the stream by two -- exactly as it would have on the fast
+            // path. Advancing by one here left a phantom gap after every
+            // multi-message recovery, and no line can ever fill a gap that
+            // sits inside an already-delivered datagram.
+            self.expected += u64::from(self.stash_count[slot]);
         }
     }
 
@@ -303,6 +323,25 @@ mod tests {
         arbitrator.drain_stash(|payload| delivered.push(payload.to_vec()));
         assert_eq!(delivered, vec![b"three".to_vec()]);
         assert_eq!(arbitrator.expected(), 4);
+    }
+
+    #[test]
+    fn a_recovered_datagram_advances_by_its_whole_count() {
+        let mut arbitrator = Arbitrator::new(SESSION, 1);
+        // Line A loses the two-message datagram (1,2) and delivers (3,2).
+        assert_eq!(
+            arbitrator.admit(&header(3, 2), b"three-four"),
+            Admit::Gap { missing: 2 }
+        );
+        // Line B supplies (1,2) in sequence; the stash must then release
+        // (3,2) and land on 5. Landing on 4 opens a phantom gap in the middle
+        // of an already-delivered datagram, which no line can ever fill.
+        assert_eq!(arbitrator.admit(&header(1, 2), b"one-two"), Admit::Deliver);
+        let mut delivered = Vec::new();
+        arbitrator.drain_stash(|payload| delivered.push(payload.to_vec()));
+        assert_eq!(delivered, vec![b"three-four".to_vec()]);
+        assert_eq!(arbitrator.expected(), 5);
+        assert_eq!(arbitrator.admit(&header(5, 2), b"five-six"), Admit::Deliver);
     }
 
     #[test]

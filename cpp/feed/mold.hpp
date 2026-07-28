@@ -89,11 +89,22 @@ public:
             if (!held_[slot]) {
                 return;
             }
+            // A held slot whose sequence is not the expected one is a relic
+            // the window advanced past without needing; delivering it would
+            // hand the stream stale bytes under a current sequence number.
+            if (sequence_[slot] != expected_) {
+                held_[slot] = false;
+                continue;
+            }
             deliver(Bytes{stash_.data() + slot * kStashPayload, length_[slot]});
             held_[slot] = false;
             ++recovered_;
             ++delivered_;
-            ++expected_;
+            // The datagram carries its own message count, so recovery moves
+            // the stream exactly as far as the fast path would have.
+            // Advancing by one left a phantom gap after every multi-message
+            // recovery, unfillable because it sits inside delivered bytes.
+            expected_ += count_[slot];
         }
     }
 
@@ -137,6 +148,8 @@ private:
         const auto slot = static_cast<std::size_t>(header.sequence % kStash);
         std::memcpy(stash_.data() + slot * kStashPayload, payload.data(), payload.size());
         length_[slot] = static_cast<std::uint16_t>(payload.size());
+        sequence_[slot] = header.sequence;
+        count_[slot] = header.count;
         held_[slot] = true;
         return Admit::Gap;
     }
@@ -146,6 +159,10 @@ private:
     std::vector<std::byte> stash_;
     std::array<std::uint16_t, kStash> length_{};
     std::array<bool, kStash> held_{};
+    /// The stashed datagram's own header fields: the sequence proves a held
+    /// slot belongs to the present, the count is how far delivery advances.
+    std::array<std::uint64_t, kStash> sequence_{};
+    std::array<std::uint16_t, kStash> count_{};
     std::uint64_t delivered_{0};
     std::uint64_t duplicates_{0};
     std::uint64_t gaps_{0};

@@ -76,6 +76,24 @@ void a_hole_both_lines_lost_is_stashed_then_released() {
     REQUIRE(arbitrator.expected() == 4);
 }
 
+void a_recovered_datagram_advances_by_its_whole_count() {
+    Arbitrator arbitrator(kSession, 1);
+    // Line A loses the two-message datagram (1,2) and delivers (3,2).
+    const char* late = "three-four";
+    REQUIRE(arbitrator.admit(header(3, 2),
+                             Bytes{reinterpret_cast<const std::byte*>(late), 10})
+            == Admit::Gap);
+    // Line B supplies (1,2) in sequence; the stash must then release (3,2)
+    // and land on 5. Landing on 4 opens a phantom gap in the middle of an
+    // already-delivered datagram, which no line can ever fill.
+    REQUIRE(arbitrator.admit(header(1, 2), {}) == Admit::Deliver);
+    std::vector<std::size_t> released;
+    arbitrator.drain_stash([&](Bytes bytes) { released.push_back(bytes.size()); });
+    REQUIRE(released.size() == 1 && released[0] == 10);
+    REQUIRE(arbitrator.expected() == 5);
+    REQUIRE(arbitrator.admit(header(5, 2), {}) == Admit::Deliver);
+}
+
 void a_hole_wider_than_the_stash_demands_a_snapshot() {
     Arbitrator arbitrator(kSession, 1);
     REQUIRE(arbitrator.admit(header(10'000, 1), {}) == Admit::Unrecoverable);
@@ -145,6 +163,7 @@ int main() {
     headers_roundtrip();
     the_second_line_fills_what_the_first_dropped();
     a_hole_both_lines_lost_is_stashed_then_released();
+    a_recovered_datagram_advances_by_its_whole_count();
     a_hole_wider_than_the_stash_demands_a_snapshot();
     a_new_session_is_refused();
     two_lossy_lines_deliver_every_sequence_exactly_once();
