@@ -11,6 +11,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <functional>
 #include <vector>
 
@@ -92,17 +93,68 @@ void truncation(const char* name, const synth::Generated& generated, const Parse
     }
 }
 
+/// Scaling by 1e8 is what makes a long price unrepresentable, and a wrapped
+/// price is worse than a rejected message: it enters the book as a fact. In
+/// C++ the accumulation is signed overflow outright -- undefined, not wrapped.
+void a_price_no_integer_can_hold_is_refused_not_wrapped() {
+    struct Drop {
+        void operator()(const Event&) const {}
+    } sink;
+    const auto parse = [&](const std::string& body) {
+        return Json<Drop>{synth::kCrypto}.parse(
+            Bytes{reinterpret_cast<const std::byte*>(body.data()), body.size()}, sink);
+    };
+    const auto message = [](const char* price, const char* qty) {
+        return std::string{R"({"e":"trade","E":1700000000000,"s":"BTCUSDT","t":1,"p":")"}
+             + price + R"(","q":")" + qty + R"(","m":false})" + '\n';
+    };
+
+    // A shape the parser does accept, so the rejections below are about the
+    // numbers rather than about the message being unrecognisable.
+    if (!parse(message("10.5", "2.0")).ok()) {
+        ++failures;
+        std::printf("FAIL: a well-formed trade was refused\n");
+    }
+
+    const char* cases[][2] = {
+        {"99999999999999999999", "1.0"},
+        {"1.0", "99999999999999999999"},
+        // Inside the digit cap, unrepresentable only once scaled.
+        {"999999999999999999", "1.0"},
+        {"1.0", "999999999999999999"},
+        // 2^64 + 1: accumulating wraps to 1, so a checked multiply alone
+        // sees a representable price of 1.0 and accepts it. Only refusing
+        // the digits catches it, which is why both halves of the guard
+        // exist -- and in C++ the wrap itself is undefined behaviour.
+        {"18446744073709551617", "1.0"},
+        {"1.0", "18446744073709551617"},
+    };
+    for (const auto& entry : cases) {
+        const auto outcome = parse(message(entry[0], entry[1]));
+        if (outcome.ok() || outcome.error != Error::Malformed) {
+            ++failures;
+            std::printf("FAIL: accepted an unrepresentable number p=%s q=%s\n",
+                        entry[0], entry[1]);
+        }
+    }
+}
+
 /// Nineteen nines overflow an int64. Before the digit cap, accumulating them
 /// was signed overflow and the wrapped value framed a message end past every
 /// bound -- a malformed field must never cost more than a rejection.
 void a_length_no_integer_can_hold_is_refused_not_a_crash() {
-    const char* text = "8=FIX.4.4" "9=9999999999999999999" "35=W" "10=000";
-    const auto* bytes = reinterpret_cast<const std::byte*>(text);
+    // Fields joined through the named separator rather than an escape. FIX
+    // delimits with an unprintable byte, and writing it inline leaves either
+    // an invisible control character in the source or a hex escape that
+    // swallows the digit after it.
+    const auto soh = static_cast<char>(kSoh);
+    const std::string text = std::string{"8=FIX.4.4"} + soh + "9=9999999999999999999"
+                           + soh + "35=W" + soh + "10=000" + soh;
     struct Drop {
         void operator()(const Event&) const {}
     } sink;
-    const auto outcome =
-        Fix<Drop>{synth::kTradfi}.parse(Bytes{bytes, std::strlen(text)}, sink);
+    const auto outcome = Fix<Drop>{synth::kTradfi}.parse(
+        Bytes{reinterpret_cast<const std::byte*>(text.data()), text.size()}, sink);
     if (outcome.ok() || outcome.error != Error::Malformed) {
         ++failures;
         std::printf("FAIL: an overflowing length was not refused as malformed\n");
@@ -112,6 +164,7 @@ void a_length_no_integer_can_hold_is_refused_not_a_crash() {
 } // namespace
 
 int main() {
+    a_price_no_integer_can_hold_is_refused_not_wrapped();
     a_length_no_integer_can_hold_is_refused_not_a_crash();
     Rng itch_rng{kGeneratorSeed};
     const auto itch_stream = synth::itch(100'000, itch_rng);

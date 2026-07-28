@@ -128,7 +128,12 @@ impl<'b> Scan<'b> {
             Some(index) => (&raw[..index], &raw[index + 1..]),
             None => (raw, &raw[..0]),
         };
-        if whole.is_empty() {
+        // Eighteen digits keeps the accumulation itself inside i64; the
+        // scaling below is then the only step that can still overflow, and it
+        // is checked. Without both, a venue -- or anything able to inject into
+        // the feed -- turns a long run of digits into a wrapped price that
+        // enters the book as fact.
+        if whole.is_empty() || whole.len() > 18 {
             return self.err();
         }
         let mut out = 0_i64;
@@ -138,7 +143,10 @@ impl<'b> Scan<'b> {
                 _ => return self.err(),
             }
         }
-        out *= scale;
+        let Some(scaled) = out.checked_mul(scale) else {
+            return self.err();
+        };
+        out = scaled;
         let mut worth = scale;
         for byte in frac {
             match byte {

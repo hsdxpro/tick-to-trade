@@ -8,6 +8,8 @@
 
 #include "feed.hpp"
 
+#include <limits>
+
 namespace t2t::feed {
 
 template <typename Sink>
@@ -139,12 +141,18 @@ private:
             std::size_t i = 0;
             std::int64_t value = 0;
             bool any = false;
+            // Eighteen digits keeps the accumulation itself inside int64; the
+            // scaling below is then the only step that can still overflow, and
+            // it is checked. Without both, a long run of digits is signed
+            // overflow -- undefined here, and a wrapped price entering the book
+            // as fact wherever it is not.
             for (; i < raw.size() && raw[i] != '.'; ++i) {
-                if (raw[i] < '0' || raw[i] > '9') return false;
+                if (raw[i] < '0' || raw[i] > '9' || i >= 18) return false;
                 value = value * 10 + (raw[i] - '0');
                 any = true;
             }
             if (!any) return false;
+            if (value > std::numeric_limits<std::int64_t>::max() / scale) return false;
             value *= scale;
             if (i < raw.size()) {
                 ++i;

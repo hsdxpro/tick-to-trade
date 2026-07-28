@@ -106,6 +106,55 @@ fn json_survives_every_truncation() {
 /// a length, a tag, a delimiter -- anywhere -- must produce an error or a
 /// clean early stop, never a wrong event that compares equal to a real one.
 #[test]
+fn a_price_no_integer_can_hold_is_refused_not_wrapped() {
+    // Scaling by 1e8 is what makes a long price unrepresentable, and a
+    // wrapped price is worse than a rejected message: it enters the book as a
+    // fact and the strategy quotes against it. Release builds carried the
+    // wrap silently, which is the case this pins.
+    let parser = t2t_feed::json::Json {
+        symbols: synth::CRYPTO,
+    };
+    let mut sink = |_: &t2t_feed::Event| {};
+    let message = |price: &str, qty: &str| {
+        format!(
+            "{{\"e\":\"trade\",\"E\":1700000000000,\"s\":\"BTCUSDT\",\"t\":1,             \"p\":\"{price}\",\"q\":\"{qty}\",\"m\":false}}
+"
+        )
+    };
+
+    // A shape the parser does accept, so the rejections below are about the
+    // numbers rather than about the message being unrecognisable.
+    let valid = message("10.5", "2.0");
+    assert_eq!(parser.parse(valid.as_bytes(), &mut sink), Ok(valid.len()));
+
+    for (price, qty) in [
+        // Past the digit cap outright.
+        ("99999999999999999999", "1.0"),
+        ("1.0", "99999999999999999999"),
+        // Inside the cap, unrepresentable only once scaled -- the case a
+        // digit limit alone would let through.
+        ("999999999999999999", "1.0"),
+        ("1.0", "999999999999999999"),
+        // 2^64 + 1. Accumulating this wraps to 1, so a checked multiply alone
+        // sees a perfectly representable price of 1.0 and accepts it: the
+        // feed would have said eighteen quintillion and the book would have
+        // recorded one. Only refusing the digits catches it, which is why
+        // both halves of the guard are here.
+        ("18446744073709551617", "1.0"),
+        ("1.0", "18446744073709551617"),
+    ] {
+        let body = message(price, qty);
+        assert!(
+            matches!(
+                parser.parse(body.as_bytes(), &mut sink),
+                Err(t2t_feed::FeedError::Malformed { .. })
+            ),
+            "accepted an unrepresentable number: p={price} q={qty}"
+        );
+    }
+}
+
+#[test]
 fn a_length_no_integer_can_hold_is_refused_not_a_crash() {
     // Nineteen nines overflow an i64. Before the digit cap, the wrapped
     // value framed a message end past every bound and the parser panicked on
