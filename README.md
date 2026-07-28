@@ -126,7 +126,7 @@ enables, because a figure from a machine with no DPDK-bound NIC is invented.
 
 ```text
 rust/spsc       wait-free SPSC ring       loom-model-checked
-rust/feed       ITCH · FIX · JSON · Mold  one event; A/B arbitration
+rust/feed       ITCH · FIX · JSON · Mold  one event; A/B arbitration; fuzzed
 rust/book       L2/L3 maintenance         windowed bitmap ladder + open addressing
 rust/pipeline   engine · harness · rxlat  stages, session, affinity, transports
 cpp/            protocol-identical twins  MSVC + GCC, TSAN on Linux
@@ -181,6 +181,10 @@ cd cpp && g++ -std=c++20 -O1 -g -fsanitize=thread -pthread tests/test_spsc.cpp -
 - Parsers differential against generators producing bytes and meaning
   independently. Every prefix of a valid stream parses to a clean short-read.
   Corruption is refused, not reinterpreted.
+- Parsers fuzzed in both languages: 90,000 corrupted and arbitrary streams a
+  run, seeded so a failure reproduces. Rust runs it with overflow checks on,
+  C++ under ASan and UBSan. It found an unbounded accumulator that four
+  passes of reading had missed.
 - Books compared against std-collection references: full ladders, order state,
   unknown-order counts.
 - Ring orderings loom-model-checked and TSAN-checked.

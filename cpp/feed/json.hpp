@@ -212,10 +212,17 @@ private:
             } else if (key == "t") {
                 scan.skip_ws();
                 std::uint64_t id = 0;
+                int seen = 0;
                 while (!scan.done()) {
                     const auto byte = scan.current();
                     if (byte < '0' || byte > '9') break;
+                    // Nineteen digits is the most a uint64 holds. Past that a
+                    // trade id wraps into a different, plausible id -- a
+                    // corrupted field becoming a fact the system trusts
+                    // rather than a message it rejects.
+                    if (seen == 19) return Error::Malformed;
                     id = id * 10 + (byte - '0');
+                    ++seen;
                     ++scan.at;
                 }
                 trade_id = id;

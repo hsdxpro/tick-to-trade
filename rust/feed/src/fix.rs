@@ -34,7 +34,10 @@ fn pair<'b>(bytes: &'b [u8], at: &mut usize, start: usize) -> Result<(u32, &'b [
     let mut i = *at;
     loop {
         match bytes.get(i) {
-            Some(d @ b'0'..=b'9') => {
+            // Nine digits is every tag any FIX dictionary defines and the most
+            // a u32 holds without wrapping. A longer run is a malformed field,
+            // not a tag, and must not be accumulated into one.
+            Some(d @ b'0'..=b'9') if i - *at < 9 => {
                 tag = tag * 10 + u32::from(d - b'0');
                 i += 1;
             }

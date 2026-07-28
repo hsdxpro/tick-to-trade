@@ -11,6 +11,8 @@
 
 #include "feed.hpp"
 
+#include <limits>
+
 namespace t2t::feed {
 
 inline constexpr std::uint8_t kSoh = 0x01;
@@ -90,7 +92,10 @@ private:
         for (;;) {
             if (i == bytes.size()) return PairEnd::Truncated;
             const auto byte = at(bytes, i);
-            if (byte >= '0' && byte <= '9') {
+            // Nine digits is every tag any FIX dictionary defines and the
+            // most a uint32 holds without wrapping. A longer run is a
+            // malformed field, not a tag.
+            if (byte >= '0' && byte <= '9' && i - cursor < 9) {
                 tag = tag * 10 + (byte - '0');
                 ++i;
             } else if (byte == '=' && i > cursor) {
@@ -133,11 +138,15 @@ private:
         for (; i < pair.value_len; ++i) {
             const auto byte = at(bytes, pair.value_from + i);
             if (byte == '.') break;
-            if (byte < '0' || byte > '9') return false;
+            // Eighteen digits keeps the accumulation inside int64; the scaling
+            // below is then the only step that can still overflow, and it is
+            // checked. In C++ the wrap is undefined rather than merely wrong.
+            if (byte < '0' || byte > '9' || i >= 18) return false;
             whole = whole * 10 + (byte - '0');
             any = true;
         }
         if (!any) return false;
+        if (whole > std::numeric_limits<std::int64_t>::max() / scale) return false;
         std::int64_t value = whole * scale;
         if (i < pair.value_len) {
             ++i; // the dot
