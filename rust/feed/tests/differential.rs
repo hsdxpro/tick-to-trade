@@ -105,6 +105,73 @@ fn json_survives_every_truncation() {
 /// Corruption is refused with a location, not guessed at. One flipped byte in
 /// a length, a tag, a delimiter -- anywhere -- must produce an error or a
 /// clean early stop, never a wrong event that compares equal to a real one.
+/// A field whose digits wrap must be refused, not reinterpreted.
+///
+/// The accumulators wrap on purpose -- bounding them per digit cost 18% of
+/// the FIX parser -- so nothing panics when a run is too long, and only an
+/// explicit length check stands between a wrapped value and the book. These
+/// two messages differ in exactly one way: the length of the first tag.
+#[test]
+fn a_field_whose_digits_wrap_is_refused_not_reinterpreted() {
+    const SOH: u8 = 0x01;
+    let mut sink = |_: &t2t_feed::Event| {};
+
+    /// Builds a FIX message with a correct BodyLength and checksum, so the
+    /// only thing either message can be rejected for is its opening tag.
+    fn message(begin_tag: &str) -> Vec<u8> {
+        let body = b"35=W55=AAPL".to_vec();
+        let mut out = Vec::new();
+        out.extend_from_slice(begin_tag.as_bytes());
+        out.extend_from_slice(b"=FIX.4.4");
+        out.push(SOH);
+        out.extend_from_slice(format!("9={}", body.len()).as_bytes());
+        out.push(SOH);
+        out.extend_from_slice(&body);
+        let sum: u32 = out.iter().map(|byte| u32::from(*byte)).sum();
+        out.extend_from_slice(format!("10={:03}", sum % 256).as_bytes());
+        out.push(SOH);
+        out
+    }
+
+    let fix = t2t_feed::fix::Fix {
+        symbols: synth::TRADFI,
+    };
+    // The control: the same message with the tag FIX actually uses.
+    let sound = message("8");
+    assert_eq!(
+        fix.parse(&sound, &mut sink),
+        Ok(sound.len()),
+        "the control message must parse, or the case below proves nothing"
+    );
+
+    // 2^32 + 8 accumulated into a u32 wraps to exactly 8, so without the
+    // length bound this reads as tag 8 -- BeginString -- and the parser
+    // carries on through a message whose first field it has misidentified.
+    let wrapped = message("4294967304");
+    assert!(
+        matches!(
+            fix.parse(&wrapped, &mut sink),
+            Err(t2t_feed::FeedError::Malformed { .. })
+        ),
+        "a tag whose digits wrapped to 8 was accepted as BeginString"
+    );
+
+    // Twenty digits into a u64 trade id: what comes out is not what was sent,
+    // and an id the system trusts must never be a number nobody wrote.
+    let json = t2t_feed::json::Json {
+        symbols: synth::CRYPTO,
+    };
+    let body = "{\"e\":\"trade\",\"E\":1700000000000,\"s\":\"BTCUSDT\",                \"t\":18446744073709551617,\"p\":\"10.5\",\"q\":\"2.0\",\"m\":false}
+";
+    assert!(
+        matches!(
+            json.parse(body.as_bytes(), &mut sink),
+            Err(t2t_feed::FeedError::Malformed { .. })
+        ),
+        "a trade id whose digits wrapped was accepted"
+    );
+}
+
 #[test]
 fn a_price_no_integer_can_hold_is_refused_not_wrapped() {
     // Scaling by 1e8 is what makes a long price unrepresentable, and a

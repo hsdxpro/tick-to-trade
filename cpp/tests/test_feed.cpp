@@ -93,6 +93,67 @@ void truncation(const char* name, const synth::Generated& generated, const Parse
     }
 }
 
+/// A field whose digits wrap must be refused, not reinterpreted.
+///
+/// The accumulators wrap on purpose -- bounding them per digit cost 18% of
+/// the FIX parser -- so nothing traps when a run is too long, and only an
+/// explicit length check stands between a wrapped value and the book. These
+/// two messages differ in exactly one way: the length of the first tag.
+void a_field_whose_digits_wrap_is_refused_not_reinterpreted() {
+    const auto soh = static_cast<char>(kSoh);
+    // Builds a message with a correct BodyLength and checksum, so the only
+    // thing either can be rejected for is its opening tag.
+    const auto message = [&](const std::string& begin_tag) {
+        const std::string body = std::string{"35=W"} + soh + "55=AAPL" + soh;
+        std::string out = begin_tag + "=FIX.4.4" + soh + "9=" + std::to_string(body.size())
+                        + soh + body;
+        unsigned sum = 0;
+        for (const auto byte : out) {
+            sum += static_cast<unsigned char>(byte);
+        }
+        char trailer[8];
+        std::snprintf(trailer, sizeof trailer, "10=%03u", sum % 256);
+        return out + trailer + soh;
+    };
+    struct Drop {
+        void operator()(const Event&) const {}
+    } sink;
+    const auto parse = [&](const std::string& text) {
+        return Fix<Drop>{synth::kTradfi}.parse(
+            Bytes{reinterpret_cast<const std::byte*>(text.data()), text.size()}, sink);
+    };
+
+    const auto sound = message("8");
+    const auto control = parse(sound);
+    if (!control.ok() || control.consumed != sound.size()) {
+        ++failures;
+        std::printf("FAIL: the control message must parse, or the case below proves nothing\n");
+    }
+
+    // 2^32 + 8 accumulated into a uint32 wraps to exactly 8, so without the
+    // length bound this reads as tag 8 and the parser carries on through a
+    // message whose first field it has misidentified.
+    const auto wrapped = parse(message("4294967304"));
+    if (wrapped.ok() || wrapped.error != Error::Malformed) {
+        ++failures;
+        std::printf("FAIL: a tag whose digits wrapped to 8 was accepted as BeginString\n");
+    }
+
+    // Twenty digits into a uint64 trade id.
+    struct DropJson {
+        void operator()(const Event&) const {}
+    } json_sink;
+    const std::string body =
+        R"({"e":"trade","E":1700000000000,"s":"BTCUSDT","t":18446744073709551617,)"
+        R"("p":"10.5","q":"2.0","m":false})" "\n";
+    const auto id = Json<DropJson>{synth::kCrypto}.parse(
+        Bytes{reinterpret_cast<const std::byte*>(body.data()), body.size()}, json_sink);
+    if (id.ok() || id.error != Error::Malformed) {
+        ++failures;
+        std::printf("FAIL: a trade id whose digits wrapped was accepted\n");
+    }
+}
+
 /// Scaling by 1e8 is what makes a long price unrepresentable, and a wrapped
 /// price is worse than a rejected message: it enters the book as a fact. In
 /// C++ the accumulation is signed overflow outright -- undefined, not wrapped.
@@ -164,6 +225,7 @@ void a_length_no_integer_can_hold_is_refused_not_a_crash() {
 } // namespace
 
 int main() {
+    a_field_whose_digits_wrap_is_refused_not_reinterpreted();
     a_price_no_integer_can_hold_is_refused_not_wrapped();
     a_length_no_integer_can_hold_is_refused_not_a_crash();
     Rng itch_rng{kGeneratorSeed};

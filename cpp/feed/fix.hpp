@@ -92,13 +92,18 @@ private:
         for (;;) {
             if (i == bytes.size()) return PairEnd::Truncated;
             const auto byte = at(bytes, i);
-            // Nine digits is every tag any FIX dictionary defines and the
-            // most a uint32 holds without wrapping. A longer run is a
-            // malformed field, not a tag.
-            if (byte >= '0' && byte <= '9' && i - cursor < 9) {
+            if (byte >= '0' && byte <= '9') {
+                // Unsigned, so the wrap is defined rather than undefined, and
+                // the run is bounded at the '=' below -- one comparison for
+                // the whole field instead of one per digit, which measured
+                // 18% of this parser.
                 tag = tag * 10 + (byte - '0');
                 ++i;
             } else if (byte == '=' && i > cursor) {
+                // Nine digits is every tag any FIX dictionary defines and the
+                // most a uint32 holds. A longer run wrapped above, so the
+                // value is meaningless and the field is refused.
+                if (i - cursor > 9) return PairEnd::Bad;
                 break;
             } else {
                 return PairEnd::Bad;

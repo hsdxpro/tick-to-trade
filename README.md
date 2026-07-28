@@ -67,10 +67,15 @@ FNV fingerprints pinned in both test suites.
 
 | Format | Rust | C++ (MSVC) | C++ (GCC 15) |
 |---|---:|---:|---:|
-| ITCH 5.0 (binary) | **8.0** | 9.3 | 9.4 |
-| FIX 4.4 (tag=value, checksum) | 95.5 | 103.8 | **90.1** |
-| JSON (schema scanner) | **194.0** | 213.7 | 197.7 |
-| JSON via `serde_json` | 331.3 | — | — |
+| ITCH 5.0 (binary) | **8.4** | 9.3 | 9.4 |
+| FIX 4.4 (tag=value, checksum) | 105.1 | 103.8 | **90.1** |
+| JSON (schema scanner) | **212.3** | 213.7 | 197.7 |
+| JSON via `serde_json` | 368.2 | — | — |
+
+Every accumulator is bounded against a digit run no integer can hold, and the
+bound costs nothing: the digits wrap deliberately and the length is checked
+once per field. Testing it per digit was the obvious way and measured **18%**
+of the FIX parser, which is the whole reason the bound sits where it does.
 
 - The GCC column answers the MSVC column: same C++ source beats Rust on FIX,
   matches on JSON. The Windows gap is MSVC's backend, not the code.

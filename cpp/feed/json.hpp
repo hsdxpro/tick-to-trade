@@ -212,19 +212,19 @@ private:
             } else if (key == "t") {
                 scan.skip_ws();
                 std::uint64_t id = 0;
-                int seen = 0;
+                const auto from = scan.at;
                 while (!scan.done()) {
                     const auto byte = scan.current();
                     if (byte < '0' || byte > '9') break;
-                    // Nineteen digits is the most a uint64 holds. Past that a
-                    // trade id wraps into a different, plausible id -- a
-                    // corrupted field becoming a fact the system trusts
-                    // rather than a message it rejects.
-                    if (seen == 19) return Error::Malformed;
+                    // Unsigned, so the wrap is defined; bounded once below
+                    // rather than tested per digit.
                     id = id * 10 + (byte - '0');
-                    ++seen;
                     ++scan.at;
                 }
+                // Nineteen digits is the most a uint64 holds. Past that the
+                // accumulation wrapped into a different, plausible id -- a
+                // corrupted field becoming a fact the system trusts.
+                if (scan.at - from > 19) return Error::Malformed;
                 trade_id = id;
             } else if (key == "b" || key == "a") {
                 if (!symbol) return Error::Malformed;

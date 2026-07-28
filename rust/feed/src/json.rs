@@ -210,18 +210,19 @@ impl Json<'_> {
                 b"t" => {
                     scan.skip_ws();
                     let mut id = 0_u64;
-                    let mut seen = 0;
+                    let from = scan.at;
                     while let Some(byte @ b'0'..=b'9') = scan.peek() {
-                        // Nineteen digits is the most a u64 holds. Past that a
-                        // trade id wraps into a different, plausible id --
-                        // which is how a corrupted field becomes a fact the
-                        // system trusts rather than a message it rejects.
-                        if seen == 19 {
-                            return scan.err();
-                        }
-                        id = id * 10 + u64::from(byte - b'0');
-                        seen += 1;
+                        // Wrapping deliberately, bounded once below: a test
+                        // per digit costs the whole field's parse and only
+                        // ever fires on input that is being rejected anyway.
+                        id = id.wrapping_mul(10).wrapping_add(u64::from(byte - b'0'));
                         scan.at += 1;
+                    }
+                    // Nineteen digits is the most a u64 holds. Past that the
+                    // accumulation wrapped into a different, plausible id --
+                    // a corrupted field becoming a fact the system trusts.
+                    if scan.at - from > 19 {
+                        return scan.err();
                     }
                     trade_id = id;
                 }
