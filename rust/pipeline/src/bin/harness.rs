@@ -74,7 +74,7 @@ fn main() -> std::io::Result<()> {
     const ACKNOWLEDGE_EVERY: usize = 256;
 
     let read_order = |orders: &mut std::net::TcpStream,
-                          scratch: &mut [u8; ORDER_WIRE_LEN]|
+                      scratch: &mut [u8; ORDER_WIRE_LEN]|
      -> std::io::Result<bool> {
         let mut filled = 0;
         while filled < ORDER_WIRE_LEN {

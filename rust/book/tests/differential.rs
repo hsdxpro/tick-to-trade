@@ -100,7 +100,10 @@ fn level_sets_agree_with_the_reference() {
     let mut rng = Rng(GENERATOR_SEED ^ 0x11);
     let mut books = Books::new(
         1,
-        Band { tick: 1, ticks: 1_024 },
+        Band {
+            tick: 1,
+            ticks: 1_024,
+        },
     );
     let mut reference = ReferenceBooks::new(1);
     for step in 0..100_000 {
@@ -222,7 +225,11 @@ fn one_ladder_serves_any_asset_and_any_tick() {
         // it, keeps the live set inside the window and makes the agreement
         // exact -- every level, after every window the market crossed.
         assert_eq!(ladder.off_grid(), 0, "{name}: an on-grid price was refused");
-        assert_eq!(ladder.evicted(), 0, "{name}: the live set fell behind the window");
+        assert_eq!(
+            ladder.evicted(),
+            0,
+            "{name}: the live set fell behind the window"
+        );
         let mut got = Vec::new();
         ladder.for_each_from_touch(|price, qty| got.push((price, qty)));
         let want: Vec<(i64, i64)> = reference.iter().rev().map(|(p, q)| (*p, *q)).collect();
@@ -235,7 +242,6 @@ fn one_ladder_serves_any_asset_and_any_tick() {
         );
     }
 }
-
 
 /// A price that is not a multiple of the tick is refused and counted, not
 /// rounded into a neighbouring level.
@@ -254,7 +260,10 @@ fn one_ladder_serves_any_asset_and_any_tick() {
 #[test]
 fn a_deep_book_keeps_its_depth_as_the_market_moves() {
     const DEPTH: i64 = 2_500;
-    let mut ladder = Ladder::bids(Band { tick: 1, ticks: 4_096 });
+    let mut ladder = Ladder::bids(Band {
+        tick: 1,
+        ticks: 4_096,
+    });
     let mut reference: BTreeMap<i64, i64> = BTreeMap::new();
     let mut touch = 1_000_000_i64;
 
@@ -284,7 +293,10 @@ fn a_deep_book_keeps_its_depth_as_the_market_moves() {
     ladder.for_each_from_touch(|price, qty| got.push((price, qty)));
     let want: Vec<(i64, i64)> = reference.iter().rev().map(|(p, q)| (*p, *q)).collect();
     assert_eq!(got, want, "the ladder lost levels the reference kept");
-    assert!(ladder.rebases() >= 2, "the window never moved, so nothing was proven");
+    assert!(
+        ladder.rebases() >= 2,
+        "the window never moved, so nothing was proven"
+    );
 }
 
 /// Shifting the window drops exactly the levels it strands and keeps the
@@ -295,7 +307,10 @@ fn a_deep_book_keeps_its_depth_as_the_market_moves() {
 /// range passes every one of them. This test is the one that fails.
 #[test]
 fn a_window_shift_evicts_exactly_the_levels_it_strands() {
-    let mut ladder = Ladder::bids(Band { tick: 1, ticks: 4_096 });
+    let mut ladder = Ladder::bids(Band {
+        tick: 1,
+        ticks: 4_096,
+    });
     let mut reference: BTreeMap<i64, i64> = BTreeMap::new();
     let touch = 1_000_000_i64;
     for level in 0..2_500 {
@@ -322,7 +337,11 @@ fn a_window_shift_evicts_exactly_the_levels_it_strands() {
     // identity above, whose two sides drift together.
     let mut held = Vec::new();
     ladder.for_each_from_touch(|price, qty| held.push((price, qty)));
-    assert_eq!(ladder.depth(), held.len(), "the depth counter drifted from the bitmap");
+    assert_eq!(
+        ladder.depth(),
+        held.len(),
+        "the depth counter drifted from the bitmap"
+    );
     let expected: Vec<(i64, i64)> = reference
         .iter()
         .rev()
@@ -360,7 +379,11 @@ fn a_window_shift_evicts_exactly_the_levels_it_strands() {
     // below them: the reference minus its top `dropped` levels.
     let mut held = Vec::new();
     ladder.for_each_from_touch(|price, qty| held.push((price, qty)));
-    assert_eq!(ladder.depth(), held.len(), "the depth counter drifted from the bitmap");
+    assert_eq!(
+        ladder.depth(),
+        held.len(),
+        "the depth counter drifted from the bitmap"
+    );
     let expected: Vec<(i64, i64)> = reference
         .iter()
         .rev()
@@ -372,7 +395,13 @@ fn a_window_shift_evicts_exactly_the_levels_it_strands() {
 
 #[test]
 fn an_off_grid_price_is_refused_rather_than_rounded() {
-    let mut books = Books::new(1, Band { tick: 100, ticks: 256 });
+    let mut books = Books::new(
+        1,
+        Band {
+            tick: 100,
+            ticks: 256,
+        },
+    );
     let on_grid = Event {
         kind: Kind::Level,
         side: Side::Bid,

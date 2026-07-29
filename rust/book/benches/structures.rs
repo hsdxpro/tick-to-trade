@@ -159,9 +159,7 @@ fn main() {
 
     measure("ladder: custom banded bitmap", || {
         let mut sides: Vec<[Ladder; 2]> = (0..4)
-            .map(|_| {
-                [Ladder::bids(GRID), Ladder::asks(GRID)]
-            })
+            .map(|_| [Ladder::bids(GRID), Ladder::asks(GRID)])
             .collect();
         for op in &ladder_ops {
             sides[op.symbol as usize][op.side as usize].add(op.price, op.delta);
@@ -241,7 +239,10 @@ fn main() {
         let mut total = 0.0;
         check = 0;
         for round in 0..shifts {
-            let mut ladder = Ladder::bids(t2t_book::Band { tick: 1, ticks: 4_096 });
+            let mut ladder = Ladder::bids(t2t_book::Band {
+                tick: 1,
+                ticks: 4_096,
+            });
             let touch = 1_000_000 + round as i64;
             for level in 0..depth {
                 ladder.set(touch - level, 10 + level);
@@ -251,7 +252,8 @@ fn main() {
             total += started.elapsed().as_secs_f64();
             let (price, qty) = ladder.best().expect("the shifted-in level rests");
             check ^= (price as u64).wrapping_mul(31).wrapping_add(qty as u64)
-                ^ ladder.evicted() ^ ladder.depth() as u64;
+                ^ ladder.evicted()
+                ^ ladder.depth() as u64;
         }
         best = best.min(total / shifts as f64);
     }

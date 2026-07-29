@@ -33,7 +33,9 @@ fn contract(name: &str, parser: &impl Parser, bytes: &[u8], seed: u64) {
             "{name}: reported {consumed} of {} bytes consumed (seed {seed:#x})",
             bytes.len()
         ),
-        Err(FeedError::NeedMore | FeedError::Malformed { .. } | FeedError::UnknownSymbol { .. }) => {}
+        Err(
+            FeedError::NeedMore | FeedError::Malformed { .. } | FeedError::UnknownSymbol { .. },
+        ) => {}
     }
 }
 

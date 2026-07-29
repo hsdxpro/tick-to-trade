@@ -227,7 +227,9 @@ fn a_length_no_integer_can_hold_is_refused_not_a_crash() {
     // value framed a message end past every bound and the parser panicked on
     // the slice -- a malformed field must never cost more than a rejection.
     let stream = b"8=FIX.4.49=999999999999999999935=W10=000";
-    let parser = t2t_feed::fix::Fix { symbols: synth::TRADFI };
+    let parser = t2t_feed::fix::Fix {
+        symbols: synth::TRADFI,
+    };
     let mut sink = |_: &t2t_feed::Event| {};
     assert!(matches!(
         parser.parse(stream, &mut sink),

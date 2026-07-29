@@ -352,8 +352,16 @@ impl Ladder {
         let words = self.occupied.len();
         let (jump, bits) = (d / 64, (d % 64) as u32);
         for word in (0..words).rev() {
-            let high = if word >= jump { self.occupied[word - jump] } else { 0 };
-            let low = if word > jump { self.occupied[word - jump - 1] } else { 0 };
+            let high = if word >= jump {
+                self.occupied[word - jump]
+            } else {
+                0
+            };
+            let low = if word > jump {
+                self.occupied[word - jump - 1]
+            } else {
+                0
+            };
             self.occupied[word] = if bits == 0 {
                 high
             } else {
@@ -621,8 +629,7 @@ impl OrderMap {
 
     pub fn insert(&mut self, key: u64, value: Order) {
         debug_assert_ne!(key, 0, "order ID zero is the reserved empty marker");
-        if (self.len + 1) * Self::MAX_LOAD_DENOMINATOR
-            > self.slots.len() * Self::MAX_LOAD_NUMERATOR
+        if (self.len + 1) * Self::MAX_LOAD_DENOMINATOR > self.slots.len() * Self::MAX_LOAD_NUMERATOR
         {
             self.grow();
         }
