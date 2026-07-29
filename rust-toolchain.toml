@@ -1,0 +1,8 @@
+# Pinned, not floating. Every number in the README was measured with this
+# compiler; a reader who runs the benchmarks on a different one is measuring a
+# different thing, and a CI run that silently upgraded would turn a codegen
+# change into a mystery regression.
+[toolchain]
+channel = "1.97.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

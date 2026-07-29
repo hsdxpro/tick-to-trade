@@ -35,6 +35,7 @@
 
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, UdpSocket};
+use std::num::NonZeroU64;
 use std::time::{Duration, Instant};
 use t2t_pipeline::{ORDER_WIRE_LEN, OrderCommand, probe::Probes};
 
@@ -112,6 +113,12 @@ fn main() -> std::io::Result<()> {
             }
         }
     } else {
+        // `rate` is non-zero in this arm, but saying so to the compiler is
+        // better than knowing it: the division cannot be written at all
+        // without a value that carries the guarantee.
+        let Some(rate) = NonZeroU64::new(rate) else {
+            unreachable!("the closed-loop arm above covers a rate of zero");
+        };
         let period = Duration::from_nanos(1_000_000_000 / rate);
         // The schedule is shared arithmetic rather than shared state: probe
         // `i` is due at `start + i * period` on both sides, and the engine

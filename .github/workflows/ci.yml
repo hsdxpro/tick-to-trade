@@ -1,0 +1,163 @@
+name: ci
+
+# Every claim this repository makes is a command anyone can run. This runs them
+# on machines nobody here owns, which is the only way a reader can tell the
+# difference between a measured claim and a remembered one.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Read-only. Nothing here publishes, tags, or comments, so nothing here needs a
+# token that could.
+permissions:
+  contents: read
+
+# A newer push supersedes an older one on the same ref. Without this a busy day
+# queues runs that are already answered.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: rust / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      # Both platforms report even when one fails: "it broke on Windows" and
+      # "it broke everywhere" are different diagnoses.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+
+      # `rust-toolchain.toml` pins the version, so this installs exactly what
+      # the repository was measured with rather than whatever stable is today.
+      - name: Show toolchain
+        run: rustc --version && cargo --version
+
+      # Only the downloaded crates are cached, never `target/`. A stale build
+      # directory is the classic way CI passes on artifacts that no longer
+      # match the source; the few minutes of rebuild buy that never happening.
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # Release, because the differential and fuzz suites are sized to run at
+      # release speed. Debug is covered by the overflow job below.
+      - name: Tests
+        run: cargo test --release --workspace
+
+  # Debug builds trap on integer overflow where release wraps silently. The
+  # parser fuzzers exist to find exactly that, so they get a run with the traps
+  # armed -- which is how the unbounded accumulators were found.
+  overflow-checks:
+    name: rust / overflow checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+      - name: Tests with overflow checks
+        run: cargo test --workspace
+
+  # The ring's memory orderings, checked across every reachable interleaving
+  # rather than whichever one a stress test happens to hit. Slow by design:
+  # loom explores the state space.
+  loom:
+    name: rust / loom model check
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-loom-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-loom-
+      - name: Model check the SPSC ring
+        run: cargo test --release -p t2t-spsc
+        env:
+          RUSTFLAGS: --cfg loom
+
+  cpp:
+    name: c++ / ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, name: gcc }
+          - { os: windows-latest, name: msvc }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build cpp/build --config Release
+      - name: Test
+        run: ctest --test-dir cpp/build -C Release --output-on-failure
+
+  # Where a wrap is undefined behaviour rather than merely wrong, the
+  # sanitizers are the real assertion -- so the fuzz suite is built under them
+  # rather than only run bare.
+  cpp-sanitizers:
+    name: c++ / asan+ubsan+tsan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: AddressSanitizer and UndefinedBehaviorSanitizer
+        working-directory: cpp
+        run: |
+          set -euo pipefail
+          for suite in spsc feed book mold fuzz; do
+            echo "::group::asan+ubsan $suite"
+            g++ -std=c++20 -O1 -g -fsanitize=address,undefined \
+                -fno-sanitize-recover=all -pthread \
+                "tests/test_$suite.cpp" -o "/tmp/asan_$suite"
+            "/tmp/asan_$suite"
+            echo "::endgroup::"
+          done
+      - name: ThreadSanitizer on the ring
+        working-directory: cpp
+        run: |
+          set -euo pipefail
+          g++ -std=c++20 -O1 -g -fsanitize=thread -pthread \
+              tests/test_spsc.cpp -o /tmp/tsan_spsc
+          /tmp/tsan_spsc

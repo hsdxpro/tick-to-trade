@@ -1,5 +1,7 @@
 # tick-to-trade
 
+[![ci](https://github.com/hsdxpro/tick-to-trade/actions/workflows/ci.yml/badge.svg)](https://github.com/hsdxpro/tick-to-trade/actions/workflows/ci.yml)
+
 A minimal HFT pipeline in Rust and C++. Every stage benchmarked, every custom
 structure required to beat the standard library.
 
@@ -221,6 +223,10 @@ cd cpp && g++ -std=c++20 -O1 -g -fsanitize=thread -pthread tests/test_spsc.cpp -
   unknown-order counts.
 - Ring orderings loom-model-checked and TSAN-checked.
 - Both C++ suites run clean under ASan and UBSan (GCC, Linux).
+- Every one of the above runs on push, on Linux and Windows: format,
+  clippy with warnings denied, the suite in release, the suite again in
+  debug so overflow traps are armed, loom over the ring's interleavings,
+  MSVC and GCC builds, and ASan/UBSan/TSAN. The badge is that workflow.
 - Every checker mutation-tested — the ladder's window strategy, its reciprocal
   rounding, the shift's carry direction and eviction ranges, and the ring's
   orderings were each broken on purpose to confirm a test fails, in both
