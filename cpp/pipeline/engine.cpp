@@ -18,6 +18,10 @@
 #include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
 using SocketHandle = SOCKET;
+/// What this platform's `send` and `recv` take as a buffer length. Winsock
+/// says `int`, POSIX says `size_t`, and casting at the call site would be
+/// right on one of them and a sign conversion on the other.
+using SocketLen = int;
 constexpr SocketHandle kBadSocket = INVALID_SOCKET;
 static void socket_init() {
     WSADATA data;
@@ -36,6 +40,7 @@ static bool would_block() { return WSAGetLastError() == WSAEWOULDBLOCK; }
 #include <sys/socket.h>
 #include <unistd.h>
 using SocketHandle = int;
+using SocketLen = std::size_t;
 constexpr SocketHandle kBadSocket = -1;
 static void socket_init() {}
 static void set_nonblocking(SocketHandle s) {
@@ -98,7 +103,7 @@ int main(int argc, char** argv) {
         std::byte datagram[2048];
         for (;;) {
             const auto received = recv(feed, reinterpret_cast<char*>(datagram),
-                                       sizeof datagram, 0);
+                                       static_cast<SocketLen>(sizeof datagram), 0);
             if (received < 0) {
                 if (would_block()) {
                     continue;
@@ -141,7 +146,7 @@ int main(int argc, char** argv) {
         std::size_t written = 0;
         while (written < encoded.size()) {
             const auto sent = send(orders, reinterpret_cast<const char*>(encoded.data()) + written,
-                                   static_cast<int>(encoded.size() - written), 0);
+                                   static_cast<SocketLen>(encoded.size() - written), 0);
             if (sent <= 0) {
                 std::printf("engine: order connection lost\n");
                 return 1;

@@ -41,7 +41,9 @@ struct Header {
     [[nodiscard]] std::array<std::byte, kHeaderLen> encode() const {
         std::array<std::byte, kHeaderLen> out{};
         std::memcpy(out.data(), session.data(), 10);
-        for (int i = 0; i < 8; ++i) {
+        // Unsigned throughout: these are positions in an array, and a signed
+        // index has to be converted to reach one.
+        for (std::size_t i = 0; i < 8; ++i) {
             out[10 + i] = static_cast<std::byte>(sequence >> (56 - 8 * i));
         }
         out[18] = static_cast<std::byte>(count >> 8);
