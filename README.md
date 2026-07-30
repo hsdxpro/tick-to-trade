@@ -59,8 +59,16 @@ book does two updates.
 | book (ladder + order map) | 57.0 ns | **66.2%** |
 | parse (ITCH framing + fields) | 14.8 ns | 17.2% |
 | arbitrate (MoldUDP64 A/B) | 12.8 ns | 14.9% |
-| decide + encode | 1.4 ns | 1.7% |
+| decide + encode | below noise | — |
 | total | **86.0 ns** | 100% |
+
+A stage is the difference between two timings of the path, so it cannot be read
+below the gap between the two fastest rounds — 1 to 5 ns/probe here. `decide +
+encode` sits under that: it is cheap, and how cheap this method cannot say. It
+was published as 1.4 ns until the benchmark began printing its own resolution;
+timed once per variant the same stage read 17.1 ns, which is what marked the
+number as a floor rather than a cost. Variants are now interleaved, so a warming
+machine cannot charge its drift to whichever stage is measured last.
 
 ## Parsers
 
